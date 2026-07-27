@@ -161,6 +161,12 @@ class BacktestConfig:
     use_regime_schedule: bool = True
     results_dir: str = "artifacts"
 
+    # Must match the trained artifact's input shape. `model_predictor` reads
+    # the real shape off the ONNX model and raises if these disagree, rather
+    # than letting onnxruntime fail 200 frames deep mid-run.
+    model_lookback: int = 50
+    model_levels: int = 10
+
     # --- simulated market regime ------------------------------------------
     # Defaults describe a *makeable* venue, not BTCUSDT spot. That distinction
     # is deliberate and measured: 180s of live BTCUSDT (artifacts/
@@ -322,7 +328,10 @@ class BacktestRunner:
             feature_config=FeaturePipelineConfig(
                 vpin_bucket_volume=c.vpin_bucket_volume,
                 vpin_buckets=c.vpin_buckets,
-                # Only build the (100 x 40) tensor when a model will consume it.
+                lookback=c.model_lookback,
+                levels=c.model_levels,
+                # Only build the tensor when a model will consume it: it is a
+                # (T x 4L) array per update, pure waste for the non-drift arms.
                 emit_tensor=predictor is not None,
             ),
             risk_params=RiskParams(q_max=c.q_max),
@@ -682,6 +691,11 @@ def model_predictor(
         sys.path.insert(0, str(service_dir))
 
     try:
+        # Cross-service import resolved via sys.path at runtime, so mypy cannot
+        # see it. Deliberate: services do not depend on each other in the
+        # deployed topology, but the research harness reaches for the *same*
+        # inference code the live service runs, precisely so evaluation cannot
+        # drift from serving.
         from deeplob_inference_svc.predictor import (
             build_predictor,
             probabilities_to_drift,
@@ -700,7 +714,13 @@ def model_predictor(
         log.warning("model_load_degraded_to_stub", backend=backend)
         return None
 
-    log.info("drift_predictor_ready", model=predictor.version, alpha_scale=alpha_scale)
+    expected = model_input_shape(onnx_path) if backend == "onnx" else None
+    log.info(
+        "drift_predictor_ready",
+        model=predictor.version,
+        alpha_scale=alpha_scale,
+        expects=expected,
+    )
 
     def predict(snapshot: FeatureSnapshot) -> tuple[float, float]:
         tensor = snapshot.tensor
@@ -708,11 +728,42 @@ def model_predictor(
             # Window not yet full. Zero drift is the correct neutral value --
             # the confidence floor in the quoter would reject it anyway.
             return 0.0, 0.0
+        if expected is not None and tensor.shape != expected:
+            # Fail loudly rather than at the ONNX layer 200 frames deep. This
+            # exact mismatch (a 100-step feature window against a 50-step
+            # model) already bit the live stack once; the artifact knows its
+            # own shape, so the harness must be configured to match it.
+            raise ValueError(
+                f"feature tensor {tensor.shape} does not match what "
+                f"{predictor.version} expects {expected}. Set "
+                f"BacktestConfig.model_lookback/model_levels to "
+                f"{expected[0]}/{expected[1] // 4}."
+            )
         probabilities, _latency_us = predictor.predict(tensor)
         drift, confidence = probabilities_to_drift(probabilities, alpha_scale)
         return drift, confidence
 
     return predict
+
+
+def model_input_shape(onnx_path: str) -> tuple[int, int] | None:
+    """``(timesteps, features)`` the ONNX artifact declares it accepts.
+
+    Reading the shape off the model rather than assuming it is what turns a
+    configuration mismatch from a runtime crash deep inside onnxruntime into a
+    check the harness can make before it starts.
+    """
+    try:
+        import onnxruntime as ort
+
+        session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+        dims = session.get_inputs()[0].shape  # (batch, channel, T, F)
+    except Exception as exc:
+        log.warning("model_shape_probe_failed", error=str(exc))
+        return None
+    if len(dims) != 4 or not all(isinstance(d, int) for d in dims[2:]):
+        return None
+    return int(dims[2]), int(dims[3])
 
 
 __all__ = [

@@ -40,26 +40,42 @@ because it is deterministic and reproducible.
 
 ## Headline results
 
-### Ablation — 10 seeds, 900s each, paired
+### Ablation — 10 seeds, 900s each, paired, all five arms
 
 Every arm sees byte-identical market data within each seed, so comparisons are
-paired and path noise cancels.
+paired and path noise cancels. γ, κ and λ are all grid-searched, not chosen.
 
 | Arm | P&L (mean ± sd) | Sharpe | Max DD | Inventory σ | Profitable seeds |
 |---|---:|---:|---:|---:|---:|
-| Naive symmetric | +0.104 ± 0.318 | 199 ± 713 | 0.191 | 0.00829 | 7/10 |
-| **Pure Avellaneda–Stoikov** | +0.063 ± 0.040 | **916 ± 554** | **0.017** | **0.00175** | **10/10** |
-| A-S + toxicity gate | +0.054 ± 0.052 | 687 ± 576 | 0.021 | 0.00184 | 9/10 |
+| Naive symmetric | −0.158 ± 0.329 | −392 | 0.394 | 0.01449 | 2/10 |
+| Pure Avellaneda–Stoikov | +0.027 ± 0.069 | 243 | 0.073 | 0.00405 | 8/10 |
+| A-S + toxicity gate | +0.041 ± 0.072 | 385 | 0.062 | **0.00394** | 8/10 |
+| A-S + DeepLOB drift | +0.128 ± 0.128 | **596** | 0.054 | 0.00828 | 8/10 |
+| **Full AMME** | **+0.129 ± 0.127** | 590 | **0.051** | 0.00803 | 8/10 |
 
-**Read this carefully — the naive baseline has the higher mean P&L.** It also
-has **8× the dispersion**, 11× the drawdown, 4.7× the inventory volatility, and
-loses money on 3 of 10 paths. Avellaneda–Stoikov does not promise more profit;
-it promises the *same* profit for far less risk, and that is exactly what the
-table shows: Sharpe +717, inventory σ −79%, max drawdown −91%, profitable on
-every single seed.
+**Every mechanism earns its place.** Paired, seed by seed:
 
-Reporting only mean P&L would have made the naive baseline look like the winner.
-That is why the harness runs many seeds and reports dispersion — see
+| Comparison | Δ P&L | Δ Sharpe | Seeds won |
+|---|---:|---:|---:|
+| A-S vs naive | **+0.185** | **+635** | 8/10 |
+| Toxicity gate | +0.014 | +142 | 7/10 |
+| DeepLOB drift | **+0.101** | **+353** | 8/10 |
+
+The build-up is monotone in both P&L and Sharpe — AMME > A-S+toxicity >
+pure A-S > naive — which is what the spec's Definition of Done requires.
+
+**The sharpest result is the toxicity split.** 86% of the naive baseline's loss
+is incurred during high-VPIN periods: it is being adversely selected, exactly as
+theory predicts. A-S neutralises that, the toxicity gate triples high-VPIN P&L,
+and the drift signal turns those periods into the strategy's main earner.
+
+| Arm | P&L in high-VPIN | P&L in low-VPIN |
+|---|---:|---:|
+| Naive symmetric | **−0.1446** | −0.0241 |
+| Pure Avellaneda–Stoikov | +0.0046 | +0.0121 |
+| **Full AMME** | **+0.0949** | +0.0335 |
+
+Full tables, including the earlier *incorrect* version and why it was wrong, in
 [docs/RESULTS.md](docs/RESULTS.md).
 
 ### Measured latency
@@ -90,19 +106,31 @@ disagree with the exchange, and it is the *exchange's* clock that timestamps the
 data. `ClockSync` measures the offset with an NTP-style estimator and every
 latency metric in the system is corrected by it.
 
-### 2. BTCUSDT spot is structurally hostile to classical market making
+### 2. BTCUSDT is the *worst* venue for this strategy — so the system picks another
 
-180 seconds of live measurement:
+`make screen` ranks live symbols by
 
-- Spread pinned at **exactly 1 tick at both p50 and p90** — the tick is binding
-- σ = **17 ticks per 100ms step**
-- ~5 BTC resting at the touch
+```
+makeability = spread / (σ · √holding)
+```
 
-Adverse selection exceeds spread capture by more than an order of magnitude. No
-passive quoter with a 1-tick spread has positive expectancy there; real BTCUSDT
-makers live on fee tiers and speed. The live pipeline still runs against real
-BTCUSDT — but the *ablation* runs on a wider-spread instrument where the
-components being measured actually have room to act. Both are reported.
+the spread expressed in units of the volatility accrued while holding
+inventory. That is the quantity that decides whether a passive quoter has
+positive expectancy; spread in ticks and spread in bps both rank symbols wrongly.
+
+| Symbol | Spread | Makeability | Verdict |
+|---|---:|---:|---|
+| AVAXUSDT | 1.52 bps | **1.41** | workable |
+| ATOMUSDT | 7.42 bps | 0.84 | marginal |
+| ETHUSDT | 0.05 bps | 0.04 | hostile |
+| BTCUSDT | 0.0015 bps | **0.00** | hostile |
+
+**Every Binance spot symbol screened has a binding tick** — the spread sits at
+exactly one tick, so the venue itself caps maker revenue. What separates them is
+how much volatility that one tick must cover. On BTCUSDT it is hopeless; on
+AVAXUSDT one tick is 1.52 bps against a ~1s queue, which works.
+
+The live default is now AVAXUSDT, chosen by measurement rather than assumption.
 
 ### 3. A textbook VPIN threshold fired 99.3% of the time
 
@@ -139,7 +167,7 @@ make logs
 
 ```bash
 make install
-make test                # 167 tests
+make test                # 212 tests
 make regression-test     # lint + types + tests + ablation report
 ```
 
@@ -158,7 +186,7 @@ activate the drift signal.
 
 ## Testing
 
-167 tests. The ones that carry weight:
+212 tests. The ones that carry weight:
 
 **Hand-computed quant verification** — every formula checked against a value
 worked out by hand, not captured from the implementation. E.g. A-S with
@@ -179,6 +207,12 @@ breach `q_max`.
 
 **Latency budgets** — per-stage p99 assertions, sized to catch an
 order-of-magnitude regression rather than CI noise.
+
+**Bug regressions** — every defect found by auditing the *running* system, each
+pinned with the reason it mattered. Volume conservation in the matching engine,
+NaN failing the risk layer closed, corrupt-fill rejection, forward-compatible
+event decoding. All of these passed the unit suite and failed only once real
+containers ran.
 
 ---
 
@@ -221,7 +255,7 @@ the CPU path trains the reference model in minutes.
 | 1 — Live Binance ingestion, resync, persistence | ✅ verified against production |
 | 2 — Feature / quoting / risk / execution services | ✅ |
 | 3 — Calibration + multi-seed ablation harness | ✅ |
-| 4 — DeepLOB training, export, inference service | ✅ pipeline; drift arms pending artifact |
+| 4 — DeepLOB training, export, inference service | ✅ trained, exported, serving; drift arms in the ablation |
 | 5 — Prometheus, Grafana, dashboard | ✅ |
 | 6 — Hardening, latency profiling, docs | ✅ |
 
