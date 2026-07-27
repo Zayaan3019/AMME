@@ -13,11 +13,12 @@ import sys
 from pathlib import Path
 
 from amme_shared.logging import configure_logging
-from backtest_svc.calibrate import DEFAULT_AS_GRID, Calibrator
+from backtest_svc.calibrate import DEFAULT_AS_GRID, DEFAULT_LAMBDA_GRID, Calibrator
 from backtest_svc.runner import (
     ABLATION_ARMS,
     BacktestConfig,
     BacktestRunner,
+    model_predictor,
     render_multi_seed_markdown,
 )
 
@@ -38,12 +39,23 @@ def _config(args: argparse.Namespace) -> BacktestConfig:
 def cmd_ablation(args: argparse.Namespace) -> int:
     log = configure_logging("backtest-cli", "INFO", json_output=False)
     config = _config(args)
-    runner = BacktestRunner(config)
+
+    # The drift arms need a real model. Attach one if the artifact exists;
+    # otherwise skip those arms rather than scoring a zero-drift stub and
+    # reporting it as "DeepLOB adds nothing" -- which would be a claim about
+    # the stub, not the model.
+    predictor_factory = None
+    if config.drift_lambda > 0:
+        probe = model_predictor(alpha_scale=args.alpha_scale)
+        if probe is not None:
+            predictor_factory = lambda: model_predictor(alpha_scale=args.alpha_scale)  # noqa: E731
+        else:
+            log.warning("drift_arms_skipped", reason="no usable model artifact")
+
+    runner = BacktestRunner(config, predictor_factory=predictor_factory)
     arms = tuple(
         a for a in ABLATION_ARMS
-        # Drift arms need a model; skip them until one exists so the harness
-        # stays runnable in CI rather than failing on a missing artifact.
-        if a.drift_lambda >= 0 or config.drift_lambda > 0
+        if a.drift_lambda >= 0 or (config.drift_lambda > 0 and predictor_factory is not None)
     )
     seeds = args.seeds or list(DEFAULT_SEEDS)
     log.info("ablation_start", seeds=len(seeds), arms=[a.key for a in arms],
@@ -125,12 +137,53 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate_lambda(args: argparse.Namespace) -> int:
+    """Grid-search the drift injection weight (spec s.5.4).
+
+    Swept on the ``as_drift`` arm, not on full AMME: mixing the toxicity gate
+    in would confound the two mechanisms the ablation exists to separate.
+    """
+    log = configure_logging("backtest-cli", "INFO", json_output=False)
+    config = _config(args)
+
+    probe = model_predictor(alpha_scale=args.alpha_scale)
+    if probe is None:
+        print("no usable model artifact; run `make train` first", file=sys.stderr)
+        return 1
+
+    arm = next(a for a in ABLATION_ARMS if a.key == "as_drift")
+    seeds = args.seeds or list(DEFAULT_SEEDS[:3])
+    calibrator = Calibrator(
+        config, seeds=seeds, arm=arm, min_fills=args.min_fills,
+        predictor_factory=lambda: model_predictor(alpha_scale=args.alpha_scale),
+    )
+    result = calibrator.sweep(DEFAULT_LAMBDA_GRID)
+
+    out = Path(config.results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    markdown = result.to_markdown()
+    (out / "calibration_lambda.md").write_text(markdown, encoding="utf-8")
+    print(markdown)
+
+    best = result.best()
+    if best is None:
+        print("no eligible lambda found", file=sys.stderr)
+        return 1
+    log.info("lambda_selected", **dict(best.params))
+    print(f"\nBEST: {best.label()}  score={best.score:+.4f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="backtest_svc.cli", description=__doc__)
     parser.add_argument("--duration", type=float, default=900.0, help="seconds per run")
     parser.add_argument("--warmup", type=float, default=90.0, help="seconds excluded from metrics")
     parser.add_argument("--drift-lambda", type=float, default=0.0, dest="drift_lambda")
     parser.add_argument("--seeds", type=int, nargs="*", default=None)
+    parser.add_argument(
+        "--alpha-scale", type=float, default=2e-5, dest="alpha_scale",
+        help="label threshold used to convert class probabilities to a return",
+    )
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -145,6 +198,10 @@ def main(argv: list[str] | None = None) -> int:
     calibrate = sub.add_parser("calibrate", help="grid-search gamma/kappa")
     calibrate.add_argument("--min-fills", type=int, default=30, dest="min_fills")
     calibrate.set_defaults(func=cmd_calibrate)
+
+    lam = sub.add_parser("calibrate-lambda", help="grid-search the drift weight")
+    lam.add_argument("--min-fills", type=int, default=30, dest="min_fills")
+    lam.set_defaults(func=cmd_calibrate_lambda)
 
     args = parser.parse_args(argv)
     result: int = args.func(args)

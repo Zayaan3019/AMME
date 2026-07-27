@@ -25,9 +25,10 @@ not trading is not a strategy.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
+from amme_core.engine import DriftPredictor
 from amme_shared.logging import get_logger
 from backtest_svc.runner import (
     ABLATION_ARMS,
@@ -102,6 +103,7 @@ class Calibrator:
         arm: ArmSpec | None = None,
         risk_penalty: float = 1.0,
         min_fills: int = 30,
+        predictor_factory: Callable[[], DriftPredictor | None] | None = None,
     ) -> None:
         self.base = base
         self.seeds = list(seeds)
@@ -111,6 +113,7 @@ class Calibrator:
         self.arm = arm or next(a for a in ABLATION_ARMS if a.key == "pure_as")
         self.risk_penalty = risk_penalty
         self.min_fills = min_fills
+        self.predictor_factory = predictor_factory
 
     def _evaluate(self, overrides: dict[str, float]) -> CalibrationPoint:
         pnls: list[float] = []
@@ -124,7 +127,7 @@ class Calibrator:
             config = replace(self.base, seed=seed)
             for field_name, value in overrides.items():
                 config = replace(config, **{field_name: value})  # type: ignore[arg-type]
-            runner = BacktestRunner(config)
+            runner = BacktestRunner(config, predictor_factory=self.predictor_factory)
             result = runner.run_arm(self.arm)
             m = result.metrics
             pnls.append(m.total_pnl)

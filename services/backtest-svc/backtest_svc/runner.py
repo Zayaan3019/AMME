@@ -132,16 +132,22 @@ class BacktestConfig:
     # Grid-searched, not guessed: backtest_svc.calibrate swept gamma x kappa
     # over 3 seeds and ranked by mean(P&L) - stdev(P&L) across seeds, with
     # candidates under 30 fills disqualified so "never trade" cannot win.
-    # See docs/RESULTS.md for the full sweep table.
-    gamma: float = 1.5
-    kappa: float = 3.0
+    #
+    # RE-DERIVED after the matching-engine over-fill fix. The previous winner
+    # (gamma=1.5, kappa=3) traded only 87 times per run and its P&L was
+    # inflated by through-fills that ignored the aggressor's size. On the
+    # corrected engine it drops to rank 2, and the optimum moves to a
+    # configuration that actually participates: 397 fills, tighter dispersion
+    # (+0.022 +/- 0.014 vs +0.043 +/- 0.038), Sharpe 668. See docs/RESULTS.md.
+    gamma: float = 4.0
+    kappa: float = 40.0
     horizon_seconds: float = 15.0
     min_half_spread_ticks: float = 1.0
     drift_lambda: float = 0.0
 
-    # Matched to the calibrated A-S half-spread (~27 ticks) so the baseline is
-    # a fair competitor rather than a straw man quoting at a different width.
-    naive_half_spread_ticks: float = 27.0
+    # Matched to the recalibrated A-S half-spread so the baseline competes at
+    # the same width rather than being a straw man.
+    naive_half_spread_ticks: float = 8.0
 
     vpin_bucket_volume: float = 0.05
     vpin_buckets: int = 30
@@ -644,6 +650,67 @@ def stub_predictor() -> DriftPredictor:
 
     def predict(_snapshot: FeatureSnapshot) -> tuple[float, float]:
         return 0.0, 0.0
+
+    return predict
+
+
+def model_predictor(
+    onnx_path: str = "models/deeplob.onnx",
+    torchscript_path: str = "models/deeplob.ts",
+    alpha_scale: float = 2e-5,
+    threads: int = 1,
+) -> DriftPredictor | None:
+    """Bridge the trained artifact into the backtester's drift arms.
+
+    This is what makes ``as_drift`` and ``amme`` runnable at all: the harness
+    needs a ``FeatureSnapshot -> (drift, confidence)`` callable, and the model
+    speaks ``(T, F) tensor -> 3 class probabilities``.
+
+    It deliberately reuses ``deeplob_inference_svc``'s own predictor and
+    conversion rather than reimplementing them. Any divergence between how the
+    ablation scores the model and how the live service uses it would make the
+    reported edge unattributable -- the classic train/serve skew, moved one
+    layer up into evaluation.
+
+    Returns ``None`` when no artifact exists, so the runner can skip the drift
+    arms rather than silently score a stub as if it were a model.
+    """
+    import sys
+
+    service_dir = Path(__file__).resolve().parents[2] / "deeplob-inference-svc"
+    if str(service_dir) not in sys.path:
+        sys.path.insert(0, str(service_dir))
+
+    try:
+        from deeplob_inference_svc.predictor import (
+            build_predictor,
+            probabilities_to_drift,
+        )
+    except ImportError as exc:
+        log.warning("predictor_import_failed", error=str(exc))
+        return None
+
+    backend = "onnx" if Path(onnx_path).exists() else "torchscript"
+    if not Path(onnx_path).exists() and not Path(torchscript_path).exists():
+        log.warning("no_model_artifact", onnx=onnx_path, torchscript=torchscript_path)
+        return None
+
+    predictor = build_predictor(backend, torchscript_path, onnx_path, threads)
+    if predictor.version == "stub":
+        log.warning("model_load_degraded_to_stub", backend=backend)
+        return None
+
+    log.info("drift_predictor_ready", model=predictor.version, alpha_scale=alpha_scale)
+
+    def predict(snapshot: FeatureSnapshot) -> tuple[float, float]:
+        tensor = snapshot.tensor
+        if tensor is None:
+            # Window not yet full. Zero drift is the correct neutral value --
+            # the confidence floor in the quoter would reject it anyway.
+            return 0.0, 0.0
+        probabilities, _latency_us = predictor.predict(tensor)
+        drift, confidence = probabilities_to_drift(probabilities, alpha_scale)
+        return drift, confidence
 
     return predict
 
