@@ -50,8 +50,9 @@ format: ## ruff format + autofix
 	$(VENV_PY) -m ruff format shared services tests train
 	$(VENV_PY) -m ruff check --fix shared services tests train
 
-typecheck: ## mypy --strict over the shared core
+typecheck: ## mypy --strict over shared + every service
 	$(VENV_PY) -m mypy shared/amme_shared shared/amme_core
+	$(VENV_PY) -m mypy services/*/[a-z]*_svc
 
 # ---------------------------------------------------------------- tests --
 test: ## Full test suite
@@ -88,6 +89,9 @@ ablation: ## Multi-seed ablation -> artifacts/ + docs/RESULTS.md
 
 calibrate: ## Grid-search gamma/kappa -> artifacts/calibration.md
 	PYTHONPATH=services/backtest-svc $(VENV_PY) -m backtest_svc.cli calibrate
+
+screen: ## Rank live venues by market-making viability -> artifacts/venue_screen.md
+	PYTHONPATH=services/ingestion-svc $(VENV_PY) -m ingestion_svc.screener
 
 record: ## Record live Binance data to TimescaleDB for training
 	PYTHONPATH=services/ingestion-svc $(VENV_PY) -m amme_train.record --minutes 60
