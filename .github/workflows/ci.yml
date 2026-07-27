@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push makes an in-flight run irrelevant; cancel it rather than
+  # paying for both.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONIOENCODING: utf-8
+  PYTHONUNBUFFERED: "1"
+  # Network- and infra-dependent tests are opt-in. CI must not depend on
+  # Binance being reachable, or an outage at the exchange fails our build.
+  AMME_NETWORK: "0"
+  AMME_INTEGRATION: "0"
+
+jobs:
+  quality:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e shared
+          pip install ruff mypy pytest pytest-asyncio hypothesis \
+                      types-requests aiohttp websockets
+      - name: ruff
+        run: ruff check shared services tests train
+      - name: ruff format --check
+        run: ruff format --check shared services tests train
+      - name: mypy --strict
+        run: mypy shared/amme_shared shared/amme_core
+
+  test:
+    name: Tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e shared
+          pip install pytest pytest-cov pytest-asyncio hypothesis aiohttp websockets httpx
+      - name: Unit + property tests
+        run: pytest tests/unit -q
+      - name: Determinism regression (spec s.6.1)
+        run: pytest tests/regression -q -k "Determinism or NoHidden or Metrics"
+      - name: Coverage on the quant core
+        if: matrix.python == '3.11'
+        run: |
+          pytest tests -q --cov=shared/amme_core --cov=shared/amme_shared \
+                 --cov-report=term-missing --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.11'
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  latency:
+    name: Latency budgets (spec s.6.4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e shared && pip install pytest hypothesis
+      # Shared runners are noisy, so the budgets are sized to catch an
+      # order-of-magnitude regression rather than a few percent of drift.
+      - run: pytest tests/regression -q -m latency
+
+  ablation:
+    name: Ablation report
+    runs-on: ubuntu-latest
+    # The long pole. Only gate merges on it, not every intermediate push.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -e shared && pip install pytest
+      - name: Run multi-seed ablation
+        env:
+          PYTHONPATH: services/backtest-svc
+        # Shorter than the local default so CI stays inside a sensible budget;
+        # the seed set is unchanged, so arms remain paired and comparable.
+        run: python -m backtest_svc.cli --duration 300 --warmup 60 ablation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ablation-report
+          path: artifacts/
+          retention-days: 30
+      - name: Publish report to the job summary
+        if: always()
+        run: |
+          echo "## Ablation report" >> $GITHUB_STEP_SUMMARY
+          cat artifacts/ablation_multiseed.md >> $GITHUB_STEP_SUMMARY || true
+
+  docker:
+    name: Build images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - ingestion-svc
+          - feature-svc
+          - quoting-engine-svc
+          - risk-svc
+          - execution-sim-svc
+          - backtest-svc
+          - api-gateway-svc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/${{ matrix.service }}/Dockerfile
+          push: false
+          tags: amme/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  compose:
+    name: Stack smoke test
+    runs-on: ubuntu-latest
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          docker compose -f infra/docker-compose.yml --env-file .env config --quiet
+          echo "compose file is valid"

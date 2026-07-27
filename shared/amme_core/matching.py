@@ -38,7 +38,7 @@ Deliberate simplifications, stated rather than hidden:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 
 from amme_shared.events import AggressorSide, Side

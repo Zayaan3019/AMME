@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from fastapi import FastAPI
+
 from amme_shared.config import Settings
 from amme_shared.service import StreamService
 from backtest_svc.runner import ABLATION_ARMS, BacktestConfig, BacktestRunner
@@ -60,7 +62,7 @@ class BacktestService(StreamService):
         state = "running" if self._running else "idle"
         return True, f"{state}, last run produced {len(self._last_summary)} arms"
 
-    def build_app(self):  # type: ignore[no-untyped-def] -- FastAPI app, typed by base
+    def build_app(self) -> FastAPI:
         app = super().build_app()
 
         @app.post("/run")

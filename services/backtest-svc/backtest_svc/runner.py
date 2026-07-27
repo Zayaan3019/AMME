@@ -537,6 +537,30 @@ def render_multi_seed_markdown(report: MultiSeedReport, config: BacktestConfig) 
             f"| {a.avg_spread_mean:.4f} | {a.seeds_profitable}/{a.n_seeds} |"
         )
 
+    # Toxicity-adjusted P&L (spec s.6.2). Splitting P&L by the VPIN regime it
+    # accrued in is the only way to see whether the toxicity gate does its job:
+    # a gate that widens during informed flow should show up as *less negative*
+    # high-VPIN P&L, even if the overall figure is unchanged or slightly worse
+    # from the fills it forgoes.
+    lines.append("")
+    lines.append("### Toxicity-adjusted P&L")
+    lines.append("")
+    lines.append(
+        "P&L attributed to the regime it accrued in, split at each run's median "
+        "VPIN. Increments are tagged by the VPIN at the *start* of the interval, "
+        "so a loss is never attributed to the toxicity reading it helped cause."
+    )
+    lines.append("")
+    lines.append("| Arm | P&L in high-VPIN | P&L in low-VPIN | High-VPIN share of total |")
+    lines.append("|---|---:|---:|---:|")
+    for a in aggregates:
+        total = a.pnl_high_vpin_mean + a.pnl_low_vpin_mean
+        share = (a.pnl_high_vpin_mean / total * 100.0) if abs(total) > 1e-12 else 0.0
+        lines.append(
+            f"| **{a.label}** | {a.pnl_high_vpin_mean:+.4f} "
+            f"| {a.pnl_low_vpin_mean:+.4f} | {share:.0f}% |"
+        )
+
     lines.append("")
     lines.append("### Paired component deltas")
     lines.append("")

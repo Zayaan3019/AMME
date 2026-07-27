@@ -437,11 +437,14 @@ class MarketSimulator:
 
 
 def default_regime_schedule(total_seconds: float) -> list[tuple[float, Regime]]:
-    """Calm -> toxic -> calm -> volatile -> calm.
+    """Calm -> toxic -> calm -> volatile -> calm -> trending.
 
     Deliberately returns to calm between stressed regimes: the toxicity-adjusted
     P&L metric in s.6.2 needs both stressed and unstressed periods inside one
     seed to be comparable.
+
+    Suitable for *backtesting*, where the whole run is scored as one sample.
+    Use :func:`cycling_regime_schedule` for ML training data -- see there.
     """
     q = total_seconds / 8.0
     return [
@@ -454,6 +457,41 @@ def default_regime_schedule(total_seconds: float) -> list[tuple[float, Regime]]:
     ]
 
 
+def cycling_regime_schedule(
+    total_seconds: float, cycles: int = 8
+) -> list[tuple[float, Regime]]:
+    """Repeat the full regime cycle ``cycles`` times across the run.
+
+    This exists because of a concrete failure. Training data generated with
+    :func:`default_regime_schedule` puts TRENDING in the final eighth of the
+    run -- which, under the chronological train/val/test split that ML
+    correctness *requires*, lands entirely inside the test set. The result was a
+    test split that was **80.4% "up"** against a training split that was
+    balanced 31/38/31.
+
+    That combination is worthless for evaluation: a model that ignores its
+    input and always predicts "up" scores 80.4%, and no honest accuracy figure
+    can be quoted. The split itself is not the problem -- a random split would
+    be far worse, since overlapping windows leak. The problem is that one
+    contiguous slice of a single-pass schedule is not *representative*.
+
+    Cycling the regimes means every chronological slice contains calm, toxic,
+    volatile and trending periods, so the splits are comparable while remaining
+    strictly time-ordered and leak-free.
+    """
+    if cycles < 1:
+        raise ValueError("cycles must be >= 1")
+    per_cycle = total_seconds / cycles
+    schedule: list[tuple[float, Regime]] = []
+    order = (Regime.CALM, Regime.TOXIC, Regime.CALM, Regime.VOLATILE,
+             Regime.CALM, Regime.TRENDING)
+    step = per_cycle / len(order)
+    for c in range(cycles):
+        base = c * per_cycle
+        schedule.extend((base + i * step, regime) for i, regime in enumerate(order))
+    return schedule
+
+
 __all__ = [
     "REGIME_TABLE",
     "MarketSimulator",
@@ -461,5 +499,6 @@ __all__ = [
     "RegimeParams",
     "SimulatorConfig",
     "SimulatorState",
+    "cycling_regime_schedule",
     "default_regime_schedule",
 ]

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import uuid
 from enum import StrEnum
+from itertools import pairwise
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -120,7 +121,7 @@ class OrderBookUpdate(BaseEvent):
             ("bids", self.bids, True),
             ("asks", self.asks, False),
         ):
-            for prev, cur in zip(levels, levels[1:], strict=False):
+            for prev, cur in pairwise(levels):
                 ordered = prev.price > cur.price if descending else prev.price < cur.price
                 if not ordered:
                     raise ValueError(f"{name} not strictly ordered at {prev.price}->{cur.price}")
@@ -317,9 +318,13 @@ class RiskDecision(BaseEvent):
         has_quote = None not in (self.bid_price, self.ask_price, self.bid_size, self.ask_size)
         if actionable and not has_quote:
             raise ValueError(f"action={self.action} requires a full quote payload")
-        if actionable and self.bid_price is not None and self.ask_price is not None:
-            if self.bid_price >= self.ask_price:
-                raise ValueError("crossed quote after risk amendment")
+        if (
+            actionable
+            and self.bid_price is not None
+            and self.ask_price is not None
+            and self.bid_price >= self.ask_price
+        ):
+            raise ValueError("crossed quote after risk amendment")
         return self
 
 
@@ -381,8 +386,8 @@ __all__ = [
     "BaseEvent",
     "DataSource",
     "DriftSignal",
-    "Fill",
     "FeatureVector",
+    "Fill",
     "OrderBookUpdate",
     "PortfolioState",
     "Price",

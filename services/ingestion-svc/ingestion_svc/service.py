@@ -22,8 +22,8 @@ from amme_shared.db import TickStore
 from amme_shared.events import OrderBookUpdate, TradeTick
 from amme_shared.metrics import (
     BOOK_RESYNCS,
-    EVENTS_PUBLISHED,
     EVENT_STALENESS,
+    EVENTS_PUBLISHED,
     MID_PRICE,
     WS_RECONNECTS,
 )
@@ -78,7 +78,7 @@ class IngestionService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_book(self) -> tuple[bool, str]:
@@ -118,7 +118,7 @@ class IngestionService(StreamService):
             try:
                 await self.store.connect()
                 self.add_health_check("timescaledb", self._check_db)
-            except Exception as exc:  # noqa: BLE001 -- persistence is optional
+            except Exception as exc:
                 self.log.warning("timescaledb_unavailable", error=str(exc))
                 self.store = None
         self._flush_task = asyncio.create_task(self._flush_loop(), name="ingestion-flush")
@@ -128,7 +128,7 @@ class IngestionService(StreamService):
             return False, "not connected"
         try:
             return bool(await self.store.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def shutdown(self) -> None:
@@ -163,7 +163,7 @@ class IngestionService(StreamService):
                 await self.store.write_books(books)
             if trades:
                 await self.store.write_trades(trades)
-        except Exception as exc:  # noqa: BLE001 -- never let storage stall the feed
+        except Exception as exc:
             self.log.error(
                 "persist_failed", books=len(books), trades=len(trades), error=str(exc)
             )

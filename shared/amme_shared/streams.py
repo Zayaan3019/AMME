@@ -17,12 +17,12 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
-from typing import Any, Final, Protocol, TypeVar
+from typing import Any, Final, Protocol, TypeVar, cast
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
-from amme_shared.events import BaseEvent
+from amme_shared.events import EVENT_TYPES, BaseEvent
 from amme_shared.logging import get_logger
 
 log = get_logger(__name__)
@@ -83,6 +83,22 @@ def _encode(event: BaseEvent) -> dict[str, str]:
 
 
 def _decode(fields: dict[str, str], event_type: type[E]) -> E:
+    """Decode using the envelope's concrete type tag, not the requested type.
+
+    Services that consume several streams at once (risk-svc, execution-sim-svc,
+    the gateway) ask for ``BaseEvent`` because they handle a mix. Validating
+    the payload *as* ``BaseEvent`` fails outright: the envelope forbids extra
+    fields, so every subclass field (``bids``, ``last_update_id``, ...) is
+    rejected and the whole pipeline goes silent while every service still
+    reports healthy.
+
+    The ``type`` tag written by :func:`_encode` exists precisely to avoid that.
+    Look up the concrete class, verify it is compatible with what the caller
+    asked for, and validate against it.
+    """
+    concrete = EVENT_TYPES.get(fields.get("type", ""))
+    if concrete is not None and issubclass(concrete, event_type):
+        return cast("E", concrete.model_validate_json(fields["data"]))
     return event_type.model_validate_json(fields["data"])
 
 
@@ -172,7 +188,7 @@ class RedisEventBus:
                         cursor[stream_name] = message_id
                     try:
                         event = _decode(fields, event_type)
-                    except Exception as exc:  # noqa: BLE001 -- poison pill must not stall
+                    except Exception as exc:
                         log.error(
                             "event_decode_failed",
                             stream=stream_name,

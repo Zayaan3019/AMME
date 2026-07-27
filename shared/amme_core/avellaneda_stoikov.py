@@ -13,7 +13,10 @@ so they get hit less on the bid and lifted more on the ask.
 
 **Optimal total spread** -- the sum of the two half-spreads:
 
-.. math:: \\delta^a + \\delta^b = \\gamma \\sigma^2 (T-t) + \\frac{2}{\\gamma}\\ln\\!\\left(1 + \\frac{\\gamma}{\\kappa}\\right)
+.. math::
+
+    \\delta^a + \\delta^b = \\gamma \\sigma^2 (T-t)
+    + \\frac{2}{\\gamma}\\ln\\!\\left(1 + \\frac{\\gamma}{\\kappa}\\right)
 
 Term one is inventory-risk compensation; term two is the monopolistic markup
 implied by the exponential arrival intensity :math:`\\lambda(\\delta) = A e^{-\\kappa\\delta}`.
@@ -59,7 +62,9 @@ from amme_core.quantize import clamp, round_to_tick
 # ---------------------------------------------------------------------------
 
 
-def reservation_price(mid: float, inventory: float, gamma: float, sigma: float, tau: float) -> float:
+def reservation_price(
+    mid: float, inventory: float, gamma: float, sigma: float, tau: float
+) -> float:
     """:math:`r = s - q\\gamma\\sigma^2\\tau` where ``tau = T - t`` in seconds."""
     if gamma <= 0.0:
         raise ValueError(f"gamma must be positive, got {gamma}")

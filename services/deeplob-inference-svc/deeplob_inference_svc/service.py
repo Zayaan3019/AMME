@@ -57,7 +57,7 @@ class DeepLOBInferenceService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_inference(self) -> tuple[bool, str]:
@@ -103,7 +103,7 @@ class DeepLOBInferenceService(StreamService):
             try:
                 with correlation_scope(features.correlation_id):
                     await self._infer(features)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
                 self.log.exception("inference_failed", error=str(exc))
             finally:

@@ -57,6 +57,13 @@ ignore = [
     "N803",   # quant code uses math notation (q, S, T) deliberately
     "N806",
     "E741",   # `l` is standard notation for a label in the DeepLOB paper
+    # Greek letters in docstrings and report tables are the actual notation
+    # from the papers (sigma, gamma, kappa). Transliterating them would make
+    # the derivations harder to check against the source material, which is
+    # the whole point of writing them out.
+    "RUF001",
+    "RUF002",
+    "RUF003",
 ]
 
 [tool.ruff.lint.per-file-ignores]

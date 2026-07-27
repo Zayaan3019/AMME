@@ -173,7 +173,7 @@ class AMMEStrategy:
         )
 
     def reset(self) -> None:
-        return None
+        self.gate.reset()
 
 
 def _as_dict(params: ASParams) -> dict[str, float | str]:

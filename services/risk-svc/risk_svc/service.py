@@ -104,7 +104,7 @@ class RiskService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_state(self) -> tuple[bool, str]:
@@ -114,7 +114,8 @@ class RiskService(StreamService):
         # an orchestrator would restart the very thing protecting us.
         return True, (
             f"inventory={self._inventory:.6g} util={self.engine.utilisation(self._inventory):.2f} "
-            f"pnl={self._total_pnl:.2f} breaker={'TRIPPED:' + breaker.trigger if breaker.tripped else 'ok'} "
+            f"pnl={self._total_pnl:.2f} "
+            f"breaker={'TRIPPED:' + breaker.trigger if breaker.tripped else 'ok'} "
             f"trips={breaker.trip_count} decisions={self._decisions} halts={self._halts}"
         )
 
@@ -163,7 +164,7 @@ class RiskService(StreamService):
                     await self.bus.ack(stream, group, message_id)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.log.exception("risk_state_stream_failed", error=str(exc))
 
     async def run_loop(self) -> None:
@@ -180,7 +181,7 @@ class RiskService(StreamService):
             try:
                 with correlation_scope(intent.correlation_id):
                     await self._evaluate(intent, symbol)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
                 self.log.exception("risk_evaluation_failed", error=str(exc))
                 # Failing closed: if risk cannot decide, nothing is authorised.

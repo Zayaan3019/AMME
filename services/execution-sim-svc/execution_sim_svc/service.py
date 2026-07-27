@@ -76,7 +76,7 @@ class ExecutionSimService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_portfolio(self) -> tuple[bool, str]:
@@ -147,7 +147,7 @@ class ExecutionSimService(StreamService):
             try:
                 with correlation_scope(event.correlation_id):
                     await self._handle(stream, event, symbol)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
                 self.log.exception("execution_failed", stream=stream, error=str(exc))
             finally:

@@ -81,6 +81,8 @@ class TradingEngine:
     """Composes the full pipeline for one strategy over one market stream."""
 
     __slots__ = (
+        "_last_sample_ns",
+        "_start_ns",
         "config",
         "features",
         "matching",
@@ -88,8 +90,6 @@ class TradingEngine:
         "result",
         "risk",
         "strategy",
-        "_last_sample_ns",
-        "_start_ns",
     )
 
     def __init__(

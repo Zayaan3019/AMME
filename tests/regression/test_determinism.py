@@ -25,6 +25,7 @@ import time
 
 import pytest
 
+from amme_core.avellaneda_stoikov import ASParams
 from amme_core.engine import EngineConfig, TradingEngine
 from amme_core.features import FeaturePipelineConfig
 from amme_core.matching import MatchingParams
@@ -37,7 +38,6 @@ from amme_core.simulator import (
     default_regime_schedule,
 )
 from amme_core.strategies import build_strategy
-from amme_core.avellaneda_stoikov import ASParams
 from amme_core.toxicity import ToxicityParams
 
 SEED = 20260727
@@ -203,7 +203,9 @@ def _core_calls() -> list[tuple[str, int, str]]:
 
 class TestNoHiddenNonDeterminism:
     #: The only sanctioned numpy RNG entry points.
-    ALLOWED_RNG = {"np.random.Generator", "np.random.PCG64", "np.random.default_rng"}
+    ALLOWED_RNG = frozenset(
+        {"np.random.Generator", "np.random.PCG64", "np.random.default_rng"}
+    )
 
     def test_no_global_random_in_core(self):
         """A single ``np.random.normal(...)`` in ``amme_core`` would make every

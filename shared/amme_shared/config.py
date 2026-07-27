@@ -8,11 +8,10 @@ Every knob has a defensible default so `docker compose up` works with an empty
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing_extensions import Self
 
 
 def _env(prefix: str = "") -> SettingsConfigDict:
@@ -30,10 +29,30 @@ class MarketConfig(BaseSettings):
     model_config = _env("AMME_MARKET_")
 
     symbol: str = Field(default="BTCUSDT", description="Binance symbol, upper case")
-    depth_levels: int = Field(default=10, gt=0, le=20, description="L2 levels tracked and published")
-    ws_base: str = "wss://stream.binance.com:9443/ws"
+    depth_levels: int = Field(
+        default=10, gt=0, le=20, description="L2 levels tracked and published"
+    )
+    # Host root only -- no trailing /ws. The client appends the path itself
+    # ("/stream?streams=...") because it subscribes to a *combined* stream
+    # (depth + aggTrade on one socket). Leaving "/ws" here produced
+    # ".../ws/stream?streams=..." and a silent HTTP 404 on every connect, with
+    # the reconnect loop masking it as a transient network problem.
+    ws_base: str = "wss://stream.binance.com:9443"
     rest_base: str = "https://api.binance.com"
-    depth_update_ms: Literal[100, 1000] = 100
+    # Plain int, not Literal[100, 1000]: environment variables arrive as
+    # strings, and pydantic will not coerce "100" into an int Literal -- it
+    # raises. That only shows up once the value actually comes from a `.env`
+    # or a container environment, never in a unit test that passes ints.
+    depth_update_ms: int = Field(
+        default=100, description="Binance depth cadence; only 100 and 1000 are supported"
+    )
+
+    @field_validator("depth_update_ms")
+    @classmethod
+    def _check_depth_cadence(cls, value: int) -> int:
+        if value not in (100, 1000):
+            raise ValueError(f"depth_update_ms must be 100 or 1000, got {value}")
+        return value
 
     tick_size: float = Field(default=0.01, gt=0.0, description="Min price increment")
     lot_size: float = Field(default=0.00001, gt=0.0, description="Min size increment")
@@ -57,7 +76,9 @@ class AvellanedaStoikovConfig(BaseSettings):
         description="Risk aversion per full-limit position (inventory is "
         "normalised by risk.q_max before entering the A-S formulas)",
     )
-    kappa: float = Field(default=200.0, gt=0.0, description="Order arrival decay: lambda = A e^{-k d}")
+    kappa: float = Field(
+        default=200.0, gt=0.0, description="Order arrival decay: lambda = A e^{-k d}"
+    )
     horizon_mode: Literal["finite", "infinite"] = Field(
         default="infinite",
         description="'finite' uses (T-t) and terminal liquidation; 'infinite' pins "
@@ -135,7 +156,9 @@ class RiskConfig(BaseSettings):
         le=1.0,
         description="Beyond this, quote one-sided only (pure unwind)",
     )
-    max_position_value: float = Field(default=10_000.0, gt=0.0, description="Notional cap, quote ccy")
+    max_position_value: float = Field(
+        default=10_000.0, gt=0.0, description="Notional cap, quote ccy"
+    )
 
     breaker_vol_multiple: float = Field(
         default=4.0, gt=0.0, description="Trip if realized vol > multiple * its rolling median"
@@ -151,7 +174,13 @@ class RiskConfig(BaseSettings):
 class ModelConfig(BaseSettings):
     model_config = _env("AMME_MODEL_")
 
-    lookback: int = Field(default=100, gt=0, description="T in the (T x F) DeepLOB input")
+    lookback: int = Field(
+        default=50,
+        gt=0,
+        description="T in the (T x F) DeepLOB input. 50, not the paper's 100: "
+        "measured p99 inference on CPU is 4.04ms at T=50 vs 7.06ms at T=100, "
+        "and the budget is 5ms. See docs/RESULTS.md 'Inference latency'.",
+    )
     levels: int = Field(default=10, gt=0, description="Book levels; F = 4 * levels")
     horizon_events: int = Field(default=20, gt=0, description="k, the label smoothing horizon")
     label_alpha: float = Field(
@@ -161,6 +190,9 @@ class ModelConfig(BaseSettings):
     onnx_path: str = Field(default="models/deeplob.onnx")
     backend: Literal["torchscript", "onnx", "stub"] = Field(
         default="stub",
+        # onnx is ~2.8x faster than torchscript here (4.04ms vs 11.44ms p99) and
+        # is the only backend that meets the budget -- switch to it once
+        # `make train` has produced models/deeplob.onnx.
         description="'stub' emits a zero-drift, uniform-probability signal so the "
         "pipeline runs end-to-end before any model exists.",
     )

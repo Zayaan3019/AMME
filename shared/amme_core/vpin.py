@@ -27,7 +27,9 @@ Two classification schemes are supported:
     The paper's own estimator, for feeds without an aggressor flag (e.g. the
     LOBSTER equities adapter):
 
-    .. math:: V^B_\\tau = V \\cdot Z\\!\\left(\\frac{P_\\tau - P_{\\tau-1}}{\\sigma_{\\Delta P}}\\right)
+    .. math::
+
+        V^B_\\tau = V \\cdot Z\\!\\left(\\frac{P_\\tau - P_{\\tau-1}}{\\sigma_{\\Delta P}}\\right)
 
     with :math:`Z` the standard normal CDF. Note the consequence
     :math:`|V^B - V^S| = V|2Z(x) - 1|`, so VPIN under BVC is bounded in [0, 1]
@@ -86,13 +88,13 @@ class VPINCalculator:
         "_bucket_buy",
         "_bucket_n",
         "_bucket_sell",
-        "_buckets",
         "_bucket_volume",
+        "_buckets",
         "_imbalance_sum",
-        "_last_price",
         "_last_bucket_close",
-        "_price_change_sq_sum",
+        "_last_price",
         "_price_change_n",
+        "_price_change_sq_sum",
         "_scheme",
         "_tick_sign",
     )

@@ -178,7 +178,7 @@ def build_predictor(
             log.warning("model_artifact_missing", path=onnx_path, falling_back="stub")
         elif backend != "stub":
             log.warning("unknown_backend", backend=backend, falling_back="stub")
-    except Exception as exc:  # noqa: BLE001 -- any load failure degrades, never crashes
+    except Exception as exc:
         log.error("predictor_load_failed", backend=backend, error=f"{type(exc).__name__}: {exc}")
     return StubPredictor()
 

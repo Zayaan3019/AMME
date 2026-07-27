@@ -86,7 +86,7 @@ class StreamService(abc.ABC):
         for name, check in self._health_checks:
             try:
                 ok, detail = await check()
-            except Exception as exc:  # noqa: BLE001 -- a failing probe is a failed check
+            except Exception as exc:
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
             details[name] = ("ok: " if ok else "FAIL: ") + detail
             healthy = healthy and ok
@@ -159,7 +159,7 @@ class StreamService(abc.ABC):
         self.log.info("service_starting", port=bind_port, symbol=self.settings.market.symbol)
         config = uvicorn.Config(
             self.build_app(),
-            host="0.0.0.0",  # noqa: S104 -- containerised; exposure is compose's decision
+            host="0.0.0.0",
             port=bind_port,
             log_config=None,
             access_log=False,

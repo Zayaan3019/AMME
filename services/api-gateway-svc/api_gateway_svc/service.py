@@ -124,7 +124,7 @@ class ApiGatewayService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_data(self) -> tuple[bool, str]:
@@ -180,7 +180,7 @@ class ApiGatewayService(StreamService):
             for client in self._clients:
                 try:
                     await client.send_text(message)
-                except Exception:  # noqa: BLE001 -- client vanished
+                except Exception:
                     dead.add(client)
             self._clients -= dead
 
@@ -244,7 +244,7 @@ class ApiGatewayService(StreamService):
                 break
             try:
                 self._apply(stream, event)
-            except Exception as exc:  # noqa: BLE001 -- the dashboard never breaks trading
+            except Exception as exc:
                 self.log.warning("gateway_apply_failed", stream=stream, error=str(exc))
             finally:
                 await self.bus.ack(stream, group, message_id)

@@ -343,14 +343,14 @@ class BinanceDepthClient:
 
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 -- any transport failure means reconnect
+            except Exception as exc:
                 if self._stopping:
                     break
                 self.stats.reconnects += 1
                 self.sync.on_disconnected()
                 # Full jitter: without it, a Binance-side blip reconnects every
                 # client on the same schedule and we all retry in lockstep.
-                sleep_for = random.uniform(0.0, backoff)  # noqa: S311 -- not cryptographic
+                sleep_for = random.uniform(0.0, backoff)
                 log.warning(
                     "ws_disconnected",
                     error=f"{type(exc).__name__}: {exc}",

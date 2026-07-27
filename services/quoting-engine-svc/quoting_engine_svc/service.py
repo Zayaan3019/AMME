@@ -102,7 +102,7 @@ class QuotingEngineService(StreamService):
     async def _check_redis(self) -> tuple[bool, str]:
         try:
             return bool(await self.bus.ping()), "connected"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_quoting(self) -> tuple[bool, str]:
@@ -151,7 +151,7 @@ class QuotingEngineService(StreamService):
                     await self.bus.ack(stream, group, message_id)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.log.exception("side_stream_failed", error=str(exc))
 
     def _current_drift(self, now_ns: int) -> tuple[float, float]:
@@ -176,7 +176,7 @@ class QuotingEngineService(StreamService):
             try:
                 with correlation_scope(event.correlation_id):
                     await self._on_features(event, symbol)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
                 self.log.exception("quote_failed", error=str(exc))
             finally:

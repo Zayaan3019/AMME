@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from itertools import pairwise
 
 import numpy as np
 
@@ -242,7 +243,7 @@ def _split_pnl_by_vpin(
     loss to the toxicity reading that the loss itself helped cause.
     """
     high = low = high_seconds = 0.0
-    for prev, cur in zip(points, points[1:], strict=False):
+    for prev, cur in pairwise(points):
         delta = cur.total_pnl - prev.total_pnl
         dt = (cur.ts_ns - prev.ts_ns) / 1e9
         if prev.vpin >= threshold:

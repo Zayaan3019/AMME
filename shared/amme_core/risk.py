@@ -266,7 +266,9 @@ class RiskEngine:
         if abs(inputs.inventory) >= p.q_unwind:
             if inputs.inventory > 0:
                 bid_size = 0.0
-                reasons.append(f"unwind: long {inputs.inventory:.6g} >= {p.q_unwind:.6g}, bid pulled")
+                reasons.append(
+                    f"unwind: long {inputs.inventory:.6g} >= {p.q_unwind:.6g}, bid pulled"
+                )
             else:
                 ask_size = 0.0
                 reasons.append(
