@@ -1,0 +1,34 @@
+# Scrapes every AMME service's /metrics endpoint.
+#
+# 5s interval: the pipeline emits at 10Hz, so a 15s default would alias the
+# metrics we care most about (spread, inventory, VPIN) beyond usefulness.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    stack: amme
+
+scrape_configs:
+  - job_name: amme-services
+    metrics_path: /metrics
+    static_configs:
+      - targets: [ingestion-svc:8001]
+        labels: {service: ingestion-svc, tier: data}
+      - targets: [feature-svc:8002]
+        labels: {service: feature-svc, tier: data}
+      - targets: [deeplob-inference-svc:8003]
+        labels: {service: deeplob-inference-svc, tier: ml}
+      - targets: [quoting-engine-svc:8004]
+        labels: {service: quoting-engine-svc, tier: strategy}
+      - targets: [risk-svc:8005]
+        labels: {service: risk-svc, tier: risk}
+      - targets: [execution-sim-svc:8006]
+        labels: {service: execution-sim-svc, tier: execution}
+      - targets: [backtest-svc:8007]
+        labels: {service: backtest-svc, tier: research}
+      - targets: [api-gateway-svc:8000]
+        labels: {service: api-gateway-svc, tier: edge}
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

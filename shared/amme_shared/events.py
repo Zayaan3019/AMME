@@ -189,8 +189,18 @@ class FeatureVector(BaseEvent):
     ofi: float = Field(description="Order flow imbalance over the configured window (Cont et al.)")
     ofi_zscore: float = Field(default=0.0, description="OFI standardised by its rolling stdev")
 
-    # Volatility
-    realized_vol: float = Field(ge=0.0, description="Per-second stdev of mid returns, annualised=no")
+    # Volatility, in absolute quote-currency units per sqrt(second) -- the
+    # convention Avellaneda-Stoikov requires (arithmetic BM), NOT a return vol.
+    realized_vol: float = Field(ge=0.0, description="Rolling-window sigma; feeds the quoter")
+    realized_vol_fast: float = Field(
+        default=0.0, ge=0.0, description="EWMA sigma; reacts fast, feeds the breaker"
+    )
+    realized_vol_baseline: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Slow reference sigma. The breaker trips on fast/baseline, so "
+        "both must travel together or the ratio is meaningless.",
+    )
     vol_warm: bool = Field(default=False)
 
     # Raw normalised tensor for DeepLOB, flattened row-major (T x F).

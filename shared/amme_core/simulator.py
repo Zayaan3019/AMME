@@ -89,7 +89,10 @@ REGIME_TABLE: dict[Regime, RegimeParams] = {
 class SimulatorConfig:
     symbol: str = "BTCUSDT"
     initial_price: float = 50_000.0
-    tick_size: float = 0.1
+    #: Real BTCUSDT tick. Coarser grids make the A-S prescription unresolvable:
+    #: at tick=0.1 the optimal half-spread rounds to <1 tick and inventory
+    #: control has no price resolution to express itself through.
+    tick_size: float = 0.01
     lot_size: float = 0.00001
 
     #: Volatility of the fundamental, quote-currency units per sqrt(second).

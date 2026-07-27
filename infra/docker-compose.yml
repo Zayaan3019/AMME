@@ -1,0 +1,259 @@
+# AMME - full stack. `docker compose up` from the repo root brings up live
+# Binance ingestion through to paper-traded quotes on a Grafana dashboard.
+#
+# Build context is the repository root for every service (note `context: ..`),
+# because each image needs both `shared/` and its own `services/<name>/`. The
+# per-service Dockerfiles are multi-stage and copy only what they need.
+#
+# Startup ordering is expressed with `condition: service_healthy` rather than
+# plain `depends_on`. Plain depends_on only waits for the container to *start*,
+# which for Postgres means "the process launched", not "accepting connections" --
+# a distinction that produces a flaky stack that works on a warm machine and
+# fails on a cold one.
+
+name: amme
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  env_file:
+    - ../.env
+  environment: &common-env
+    AMME_REDIS_URL: redis://redis:6379/0
+    AMME_POSTGRES_DSN: postgresql://amme:amme@timescaledb:5432/amme
+    AMME_LOG_LEVEL: ${AMME_LOG_LEVEL:-INFO}
+    AMME_LOG_JSON: ${AMME_LOG_JSON:-true}
+    AMME_MARKET_SYMBOL: ${AMME_MARKET_SYMBOL:-BTCUSDT}
+  networks: [amme]
+  # Bounded so one runaway service cannot starve the rest of the stack on a
+  # 16GB laptop, which is the stated target environment.
+  deploy:
+    resources:
+      limits:
+        memory: 512M
+
+services:
+  # ---------------------------------------------------------------- infra --
+  redis:
+    image: redis:7-alpine
+    container_name: amme-redis
+    # appendonly keeps the streams across a restart, so a crash does not lose
+    # the in-flight pipeline. `--save ""` disables RDB snapshots: AOF alone is
+    # the right trade for an append-heavy event log.
+    command: redis-server --appendonly yes --save "" --maxmemory 512mb --maxmemory-policy noeviction
+    ports: ["6379:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [amme]
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: amme-timescaledb
+    environment:
+      POSTGRES_USER: amme
+      POSTGRES_PASSWORD: amme
+      POSTGRES_DB: amme
+      # Tick storage is append-heavy; a larger WAL reduces checkpoint churn.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports: ["5432:5432"]
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amme -d amme"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks: [amme]
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ------------------------------------------------------------ pipeline --
+  ingestion-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/ingestion-svc/Dockerfile
+    container_name: amme-ingestion
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8001"
+    ports: ["8001:8001"]
+    depends_on:
+      redis: {condition: service_healthy}
+      timescaledb: {condition: service_healthy}
+
+  feature-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/feature-svc/Dockerfile
+    container_name: amme-feature
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8002"
+    ports: ["8002:8002"]
+    depends_on:
+      redis: {condition: service_healthy}
+      ingestion-svc: {condition: service_healthy}
+
+  deeplob-inference-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/deeplob-inference-svc/Dockerfile
+    container_name: amme-deeplob
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8003"
+      # Defaults to the stub until Phase 4 produces an artifact. Set
+      # AMME_MODEL_BACKEND=torchscript once models/deeplob.ts exists.
+      AMME_MODEL_BACKEND: ${AMME_MODEL_BACKEND:-stub}
+      AMME_MODEL_ARTIFACT_PATH: /app/models/deeplob.ts
+      AMME_MODEL_ONNX_PATH: /app/models/deeplob.onnx
+      # Pinned: an unbounded thread pool on a batch-of-one forward pass adds
+      # scheduling jitter straight into p99.
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    volumes:
+      - ../models:/app/models:ro
+    ports: ["8003:8003"]
+    depends_on:
+      redis: {condition: service_healthy}
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  quoting-engine-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/quoting-engine-svc/Dockerfile
+    container_name: amme-quoting
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8004"
+    ports: ["8004:8004"]
+    depends_on:
+      redis: {condition: service_healthy}
+      feature-svc: {condition: service_healthy}
+
+  risk-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/risk-svc/Dockerfile
+    container_name: amme-risk
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8005"
+    ports: ["8005:8005"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+  execution-sim-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/execution-sim-svc/Dockerfile
+    container_name: amme-execution
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8006"
+    ports: ["8006:8006"]
+    depends_on:
+      redis: {condition: service_healthy}
+      risk-svc: {condition: service_healthy}
+
+  backtest-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/backtest-svc/Dockerfile
+    container_name: amme-backtest
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8007"
+    ports: ["8007:8007"]
+    volumes:
+      - ../artifacts:/app/artifacts
+    depends_on:
+      redis: {condition: service_healthy}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  api-gateway-svc:
+    <<: *service-defaults
+    build:
+      context: ..
+      dockerfile: services/api-gateway-svc/Dockerfile
+    container_name: amme-gateway
+    environment:
+      <<: *common-env
+      AMME_METRICS_PORT: "8000"
+    ports: ["8000:8000"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+  # ------------------------------------------------------- observability --
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: amme-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks: [amme]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: amme-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on:
+      prometheus: {condition: service_healthy}
+    networks: [amme]
+    restart: unless-stopped
+
+networks:
+  amme:
+    driver: bridge
+
+volumes:
+  redis-data:
+  timescale-data:
+  prometheus-data:
+  grafana-data:

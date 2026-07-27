@@ -103,26 +103,29 @@ class ASParams:
 
     Default ``gamma``/``kappa``/``horizon_seconds`` are jointly calibrated, not
     picked independently -- see ``docs/ARCHITECTURE.md`` "Calibration defaults".
-    Against the reference simulator regime (sigma ~ 0.3 $/sqrt(s), tick 0.1)
-    they solve for a ~1-tick half-spread when flat and a comparable reservation
-    tilt at full inventory, so inventory pressure and spread compensation sit on
-    the same scale. That target is set by the market being *competed for*: the
-    simulated book's own spread is ~1 tick, so a maker quoting 2+ ticks off mid
-    is not being prudent, it is not participating. Phase 3 re-derives all three
-    by grid search.
+    They are solved, not guessed, against measured conditions: sigma ~ 0.20
+    $/sqrt(s) and a median market spread of 2 ticks at tick=0.01. Requiring
+    (a) a 1-tick half-spread when flat, so we are competitive with that market
+    spread, and (b) a 1-tick reservation tilt at full inventory, so inventory
+    pressure is on the same scale as spread compensation, gives
 
-    ``min_half_spread_ticks`` defaults to 0.5 rather than 1.0 for the same
-    reason -- with a 1-tick market spread, half a tick off the mid *is* the
-    touch, and a 1-tick floor would silently forbid ever joining the best quote.
+        gamma*sigma^2*tau = 1 tick   and   (2/gamma)*ln(1 + gamma/kappa) = 1 tick
+
+    which solves to gamma ~ 0.017, kappa ~ 200 at tau = 15s.
+
+    The target matters as much as the arithmetic: a maker quoting several ticks
+    wider than the market is not being prudent, it is not participating -- it
+    will simply never be filled, and an ablation arm that never trades measures
+    nothing. Phase 3 re-derives all three by grid search.
     """
 
-    gamma: float = 0.075
-    kappa: float = 20.0
+    gamma: float = 0.017
+    kappa: float = 200.0
     horizon_mode: str = "infinite"
     horizon_seconds: float = 15.0
     session_seconds: float = 3600.0
     tick_size: float = 0.01
-    min_half_spread_ticks: float = 0.5
+    min_half_spread_ticks: float = 1.0
     max_half_spread_ticks: float = 500.0
     quote_size: float = 0.001
     #: q_max, in base currency. Inventory is divided by this before entering the

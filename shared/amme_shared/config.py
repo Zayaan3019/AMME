@@ -1,4 +1,4 @@
-﻿"""Central configuration. One `.env` file drives every service (DoD s.12).
+"""Central configuration. One `.env` file drives every service (DoD s.12).
 
 Every knob has a defensible default so `docker compose up` works with an empty
 `.env`. Values that materially change strategy behaviour are documented in
@@ -52,12 +52,12 @@ class AvellanedaStoikovConfig(BaseSettings):
     model_config = _env("AMME_AS_")
 
     gamma: float = Field(
-        default=0.075,
+        default=0.017,
         gt=0.0,
         description="Risk aversion per full-limit position (inventory is "
         "normalised by risk.q_max before entering the A-S formulas)",
     )
-    kappa: float = Field(default=20.0, gt=0.0, description="Order arrival decay: lambda = A e^{-k d}")
+    kappa: float = Field(default=200.0, gt=0.0, description="Order arrival decay: lambda = A e^{-k d}")
     horizon_mode: Literal["finite", "infinite"] = Field(
         default="infinite",
         description="'finite' uses (T-t) and terminal liquidation; 'infinite' pins "
@@ -69,7 +69,7 @@ class AvellanedaStoikovConfig(BaseSettings):
         default=3600.0, gt=0.0, description="Length of T in 'finite' mode"
     )
 
-    min_half_spread_ticks: float = Field(default=0.5, ge=0.0)
+    min_half_spread_ticks: float = Field(default=1.0, ge=0.0)
     max_half_spread_ticks: float = Field(default=500.0, gt=0.0)
     quote_size: float = Field(default=0.001, gt=0.0, description="Base size per side")
 

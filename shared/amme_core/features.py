@@ -1,4 +1,4 @@
-﻿"""Feature extraction: raw book and tape -> the tensors and scalars downstream needs.
+"""Feature extraction: raw book and tape -> the tensors and scalars downstream needs.
 
 Two consumers with different requirements share this pipeline:
 

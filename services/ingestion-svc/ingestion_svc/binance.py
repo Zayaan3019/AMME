@@ -1,4 +1,4 @@
-﻿"""Live Binance market data client.
+"""Live Binance market data client.
 
 This is the real thing: a production WebSocket connection to
 ``stream.binance.com``, the REST depth snapshot, and the full documented

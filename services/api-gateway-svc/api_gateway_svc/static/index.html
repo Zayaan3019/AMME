@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMME — Adaptive Market Making Engine</title>
+<style>
+/* Palette: reference categorical slots 1-3, validated all-pairs in both modes
+   (CVD dE 9.2 light / 9.4 dark; normal-vision 24.0 / 20.9). Aqua sits below
+   3:1 on the light surface, so every series carries a visible direct label -
+   the relief rule - and identity is never colour-alone. */
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;   /* P&L, bid */
+  --series-2: #eb6834;   /* ask */
+  --series-3: #1baf7a;   /* inventory */
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --success-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --success-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19; --plane: #0d0d0d; --text-primary: #fff;
+  --text-secondary: #c3c2b7; --grid: #2c2c2a; --baseline: #383835;
+  --border: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+  --success-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 20px;
+  background: var(--plane); color: var(--text-primary);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header {
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.spacer { flex: 1; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  border: 1px solid var(--border);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill.live .dot { background: var(--good); }
+.pill.down .dot { background: var(--critical); }
+.pill.halt { background: color-mix(in srgb, var(--critical) 12%, transparent); }
+.pill.halt .dot { background: var(--critical); }
+
+.tiles {
+  display: grid; gap: 12px; margin-bottom: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+}
+.tile {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px 14px;
+}
+.tile .label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin-bottom: 4px;
+}
+.tile .value { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; }
+.tile .note { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.pos { color: var(--success-text); }
+.neg { color: var(--critical); }
+
+.meter { height: 4px; border-radius: 2px; background: var(--grid); margin-top: 8px; overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--series-3); border-radius: 2px; }
+.meter.warn > i { background: var(--warning); }
+.meter.crit > i { background: var(--critical); }
+
+.grid2 { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 900px) { .grid2 { grid-template-columns: 3fr 2fr; } }
+
+.card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 14px; margin-bottom: 12px;
+}
+.card h2 {
+  font-size: 13px; font-weight: 650; margin: 0 0 2px;
+}
+.card .cap { font-size: 12px; color: var(--text-secondary); margin: 0 0 10px; }
+.chart-wrap { overflow-x: auto; }
+svg { display: block; width: 100%; height: auto; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.axis { stroke: var(--baseline); stroke-width: 1; }
+.tick { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.serieslabel { font-size: 11px; font-weight: 650; }
+
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th {
+  text-align: right; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--muted); font-weight: 600;
+  padding: 6px 8px; border-bottom: 1px solid var(--border);
+}
+th:first-child, td:first-child { text-align: left; }
+td { padding: 5px 8px; font-size: 13px; border-bottom: 1px solid var(--grid); }
+.side-bid { color: var(--series-1); font-weight: 650; }
+.side-ask { color: var(--series-2); font-weight: 650; }
+.empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AMME</h1>
+  <span class="sub">Adaptive Market Making Engine · <span id="symbol">—</span></span>
+  <span class="spacer"></span>
+  <span class="pill" id="conn"><span class="dot"></span><span id="conn-text">connecting</span></span>
+  <span class="pill" id="risk"><span class="dot"></span><span id="risk-text">risk —</span></span>
+</header>
+
+<section class="tiles">
+  <div class="tile">
+    <div class="label">Total P&amp;L</div>
+    <div class="value" id="pnl">—</div>
+    <div class="note" id="pnl-split">realized — · unrealized —</div>
+  </div>
+  <div class="tile">
+    <div class="label">Inventory</div>
+    <div class="value" id="inv">—</div>
+    <div class="note" id="inv-note">utilisation —</div>
+    <div class="meter" id="inv-meter"><i style="width:0%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="label">Mid price</div>
+    <div class="value" id="mid">—</div>
+    <div class="note" id="spread-note">spread —</div>
+  </div>
+  <div class="tile">
+    <div class="label">Our quote</div>
+    <div class="value" id="quote">—</div>
+    <div class="note" id="quote-note">half-spread —</div>
+  </div>
+  <div class="tile">
+    <div class="label">VPIN</div>
+    <div class="value" id="vpin">—</div>
+    <div class="note" id="tox-note">toxicity ×—</div>
+    <div class="meter" id="vpin-meter"><i style="width:0%"></i></div>
+  </div>
+  <div class="tile">
+    <div class="label">Fills</div>
+    <div class="value" id="fills">—</div>
+    <div class="note" id="quotes-note">quotes —</div>
+  </div>
+</section>
+
+<div class="card">
+  <h2>Cumulative P&amp;L</h2>
+  <p class="cap">Mark-to-market, quote currency. Sampled at 1&nbsp;Hz from <code>exec.portfolio</code>.</p>
+  <div class="chart-wrap"><svg id="pnl-chart" viewBox="0 0 900 220" preserveAspectRatio="none"
+       role="img" aria-label="Cumulative profit and loss over time"></svg></div>
+</div>
+
+<div class="grid2">
+  <div class="card">
+    <h2>Inventory</h2>
+    <p class="cap">Position in base currency against the hard limit. Zero line is flat.</p>
+    <div class="chart-wrap"><svg id="inv-chart" viewBox="0 0 900 200" preserveAspectRatio="none"
+         role="img" aria-label="Inventory over time against the risk limit"></svg></div>
+  </div>
+  <div class="card">
+    <h2>Quote ladder</h2>
+    <p class="cap">Where we sit relative to the market and to the reservation price.</p>
+    <div class="chart-wrap"><svg id="ladder" viewBox="0 0 420 200"
+         role="img" aria-label="Quote ladder showing our bid and ask against the market"></svg></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Recent fills</h2>
+  <p class="cap">Passive fills from <code>exec.fill</code>, newest first.</p>
+  <div id="fills-body"><p class="empty">No fills yet.</p></div>
+</div>
+
+<footer>
+  Paper trading against live Binance market data. No orders are sent to any venue.
+  Metrics at <code>/metrics</code> · state at <code>/api/state</code>.
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? "—" : v.toFixed(d);
+const signed = (v, d = 2) => (v >= 0 ? "+" : "") + fmt(v, d);
+
+let state = {};
+let history = [];
+const MAX_POINTS = 600;
+
+function css(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ---------------------------------------------------------------- charts --
+// Hand-rolled SVG rather than a charting library: the page must be fully
+// self-contained inside the container (no CDN reachable), and two line charts
+// do not justify shipping a bundler.
+function lineChart(svgId, points, accessor, colorVar, label, opts = {}) {
+  const svg = $(svgId);
+  const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height;
+  const padL = 52, padR = 58, padT = 12, padB = 22;
+  svg.innerHTML = "";
+  if (points.length < 2) {
+    svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle"
+      class="tick">waiting for data…</text>`;
+    return;
+  }
+  const ys = points.map(accessor);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (opts.includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (opts.symmetric) { const m = Math.max(Math.abs(lo), Math.abs(hi)) || 1; lo = -m; hi = m; }
+  if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
+  const pad = (hi - lo) * 0.12; lo -= pad; hi += pad;
+
+  const x = (i) => padL + (i / (points.length - 1)) * (W - padL - padR);
+  const y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+
+  let out = "";
+  // Recessive gridlines + tabular tick labels.
+  for (let k = 0; k <= 4; k++) {
+    const v = lo + (k / 4) * (hi - lo), yy = y(v);
+    out += `<line class="gridline" x1="${padL}" y1="${yy}" x2="${W-padR}" y2="${yy}"/>`;
+    out += `<text class="tick" x="${padL-6}" y="${yy+3}" text-anchor="end">${fmt(v, opts.dp ?? 2)}</text>`;
+  }
+  if (lo < 0 && hi > 0) {
+    out += `<line class="axis" x1="${padL}" y1="${y(0)}" x2="${W-padR}" y2="${y(0)}"/>`;
+  }
+  if (opts.limit) {
+    for (const s of [1, -1]) {
+      const lv = s * opts.limit;
+      if (lv > lo && lv < hi) {
+        out += `<line x1="${padL}" y1="${y(lv)}" x2="${W-padR}" y2="${y(lv)}"
+          stroke="${css('--critical')}" stroke-width="1" stroke-dasharray="3 3" opacity="0.65"/>`;
+      }
+    }
+    out += `<text class="tick" x="${W-padR+4}" y="${y(opts.limit)+3}"
+      fill="${css('--critical')}">limit</text>`;
+  }
+
+  // 2px line, per mark spec.
+  const d = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(accessor(p)).toFixed(1)}`).join("");
+  out += `<path d="${d}" fill="none" stroke="${css(colorVar)}" stroke-width="2"
+    stroke-linejoin="round" stroke-linecap="round"/>`;
+
+  // Direct label at the series end - identity is never colour-alone, and this
+  // is the relief for the sub-3:1 contrast slot.
+  const last = accessor(points[points.length - 1]);
+  const ly = Math.max(padT + 8, Math.min(H - padB - 2, y(last)));
+  out += `<circle cx="${x(points.length-1)}" cy="${y(last)}" r="3.5"
+    fill="${css(colorVar)}" stroke="${css('--surface-1')}" stroke-width="2"/>`;
+  out += `<text class="serieslabel" x="${W-padR+6}" y="${ly+4}"
+    fill="${css('--text-secondary')}">${label}</text>`;
+  svg.innerHTML = out;
+}
+
+function ladder() {
+  const svg = $("ladder");
+  const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height;
+  svg.innerHTML = "";
+  const s = state;
+  if (!s.mid_price) {
+    svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" class="tick">waiting…</text>`;
+    return;
+  }
+  const rows = [
+    { label: "our ask", price: s.quote_ask, color: "--series-2" },
+    { label: "best ask", price: s.best_ask, color: "--muted" },
+    { label: "reservation", price: s.reservation_price, color: "--text-secondary" },
+    { label: "mid", price: s.mid_price, color: "--muted" },
+    { label: "best bid", price: s.best_bid, color: "--muted" },
+    { label: "our bid", price: s.quote_bid, color: "--series-1" },
+  ].filter(r => r.price > 0);
+  const prices = rows.map(r => r.price);
+  let lo = Math.min(...prices), hi = Math.max(...prices);
+  if (hi - lo < 1e-9) { hi += 0.05; lo -= 0.05; }
+  const pad = (hi - lo) * 0.25; lo -= pad; hi += pad;
+  const y = (p) => 22 + (1 - (p - lo) / (hi - lo)) * (H - 44);
+
+  let out = "";
+  for (const r of rows) {
+    const yy = y(r.price);
+    const strong = r.label.startsWith("our");
+    out += `<line x1="120" y1="${yy}" x2="${W-92}" y2="${yy}"
+      stroke="${css(r.color)}" stroke-width="${strong ? 3 : 1.5}"
+      stroke-dasharray="${strong ? "" : "4 3"}" stroke-linecap="round"/>`;
+    out += `<text x="112" y="${yy+4}" text-anchor="end" class="tick"
+      fill="${css(strong ? r.color : '--muted')}"
+      style="font-weight:${strong ? 650 : 400}">${r.label}</text>`;
+    out += `<text x="${W-86}" y="${yy+4}" class="tick"
+      fill="${css('--text-secondary')}">${fmt(r.price, 2)}</text>`;
+  }
+  svg.innerHTML = out;
+}
+
+// ------------------------------------------------------------- rendering --
+function render() {
+  const s = state;
+  $("symbol").textContent = s.symbol || (window.__symbol || "BTCUSDT");
+
+  const pnl = s.total_pnl ?? 0;
+  const pnlEl = $("pnl");
+  pnlEl.textContent = signed(pnl, 3);
+  pnlEl.className = "value " + (pnl >= 0 ? "pos" : "neg");
+  $("pnl-split").textContent =
+    `realized ${signed(s.realized_pnl ?? 0, 3)} · unrealized ${signed(s.unrealized_pnl ?? 0, 3)}`;
+
+  $("inv").textContent = signed(s.inventory ?? 0, 5);
+  const util = Math.min(1, Math.abs(s.inventory_utilisation ?? 0));
+  $("inv-note").textContent = `utilisation ${(util * 100).toFixed(0)}% of limit`;
+  const meter = $("inv-meter");
+  meter.className = "meter" + (util >= 0.95 ? " crit" : util >= 0.6 ? " warn" : "");
+  meter.firstElementChild.style.width = (util * 100).toFixed(1) + "%";
+
+  $("mid").textContent = fmt(s.mid_price, 2);
+  $("spread-note").textContent = `market spread ${fmt(s.spread, 3)}`;
+
+  $("quote").textContent = (s.quote_bid > 0)
+    ? `${fmt(s.quote_bid, 2)} / ${fmt(s.quote_ask, 2)}` : "—";
+  $("quote-note").textContent = s.half_spread
+    ? `half-spread ${fmt(s.half_spread, 4)} · reservation ${signed(s.reservation_offset ?? 0, 4)} vs mid`
+    : "not quoting";
+
+  $("vpin").textContent = fmt(s.vpin, 3);
+  $("tox-note").textContent = `spread ×${fmt(s.toxicity_multiplier ?? 1, 2)} · OFI z ${signed(s.ofi_zscore ?? 0, 1)}`;
+  const vm = $("vpin-meter");
+  const v = Math.min(1, s.vpin ?? 0);
+  vm.className = "meter" + (v >= 0.8 ? " crit" : v >= 0.35 ? " warn" : "");
+  vm.firstElementChild.style.width = (v * 100).toFixed(1) + "%";
+
+  $("fills").textContent = s.n_fills ?? 0;
+  $("quotes-note").textContent = `${s.n_quotes ?? 0} quotes sent`;
+
+  // Status pill carries an icon-equivalent (the dot) plus a text label, so
+  // state is never colour-alone.
+  const riskEl = $("risk");
+  const halted = s.breaker_tripped || s.risk_action === "halt";
+  riskEl.className = "pill" + (halted ? " halt" : "");
+  $("risk-text").textContent = halted
+    ? `HALTED — ${(s.risk_reason || "circuit breaker").slice(0, 46)}`
+    : `risk ${s.risk_action || "—"}`;
+
+  lineChart("pnl-chart", history, p => p.pnl, "--series-1", "P&L",
+            { includeZero: true, dp: 3 });
+  lineChart("inv-chart", history, p => p.inventory, "--series-3", "inventory",
+            { symmetric: true, dp: 4, limit: window.__qmax || 0.05 });
+  ladder();
+}
+
+function renderFills(fills) {
+  const box = $("fills-body");
+  if (!fills || !fills.length) { box.innerHTML = '<p class="empty">No fills yet.</p>'; return; }
+  const rows = fills.slice(0, 12).map(f => `
+    <tr>
+      <td class="side-${f.side}">${f.side.toUpperCase()}</td>
+      <td>${fmt(f.price, 2)}</td>
+      <td>${fmt(f.size, 5)}</td>
+      <td>${signed(f.inventory_after, 5)}</td>
+      <td>${new Date(f.ts * 1000).toLocaleTimeString()}</td>
+    </tr>`).join("");
+  box.innerHTML = `<table>
+    <thead><tr><th>Side</th><th>Price</th><th>Size</th><th>Inventory after</th><th>Time</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+// ------------------------------------------------------------- transport --
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  const pill = $("conn"), text = $("conn-text");
+
+  ws.onopen = () => { pill.className = "pill live"; text.textContent = "live"; };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type !== "state") return;
+    state = msg.data;
+    if (state.mid_price > 0) {
+      history.push({ pnl: state.total_pnl, inventory: state.inventory, mid: state.mid_price });
+      if (history.length > MAX_POINTS) history.shift();
+    }
+    render();
+  };
+  ws.onclose = () => {
+    pill.className = "pill down"; text.textContent = "reconnecting";
+    // Fixed short backoff: the gateway is local, so a tight retry is cheap and
+    // the dashboard should recover the moment the container is back.
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+async function bootstrap() {
+  try {
+    const [h, f, info] = await Promise.all([
+      fetch("/api/history").then(r => r.json()),
+      fetch("/api/fills").then(r => r.json()),
+      fetch("/info").then(r => r.json()).catch(() => ({})),
+    ]);
+    history = (h.points || []).map(p => ({ pnl: p.pnl, inventory: p.inventory, mid: p.mid }));
+    window.__symbol = info.symbol;
+    renderFills(f.fills);
+  } catch (e) { /* first boot before any data — charts show the waiting state */ }
+  render();
+  connect();
+  setInterval(async () => {
+    try { renderFills((await (await fetch("/api/fills")).json()).fills); } catch (e) {}
+  }, 3000);
+}
+
+bootstrap();
+// Re-render on theme flip so chart strokes pick up the new custom properties.
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", render);
+</script>
+</body>
+</html>

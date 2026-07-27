@@ -1,0 +1,15 @@
+[project]
+name = "feature-svc"
+version = "0.1.0"
+description = "AMME feature-svc"
+requires-python = ">=3.11"
+dependencies = [
+    "amme-shared",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["feature_svc"]

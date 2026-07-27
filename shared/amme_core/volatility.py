@@ -97,25 +97,43 @@ class VolatilityBaseline:
     constantly, because both track the same recent data and their ratio wanders
     around 1 with high variance.
 
-    This tracks a long-halflife EWMA of the sigma series and, critically, only
-    updates while the market is *not* already spiking. Letting the baseline
-    absorb a volatility event is how a breaker quietly stops working during
-    exactly the regime it exists for.
+    This tracks an EWMA of the sigma series with **asymmetric** rates: it rises
+    slowly and falls faster. Rising slowly means a 5-second spike barely moves
+    it, so the breaker stays armed through the event. Rising *eventually* means
+    a genuinely sustained regime change is absorbed over minutes rather than
+    leaving the breaker latched forever.
+
+    An earlier version froze the baseline outright whenever
+    ``sigma > 2 * baseline``. That was wrong in a way worth recording: during
+    warm-up the first non-zero sigma is tiny, the baseline latched onto it, and
+    every subsequent reading then exceeded the freeze threshold -- so it froze
+    permanently at a near-zero value and the fast/baseline ratio sat at a median
+    of **3.48** instead of ~1.0, tripping the breaker 33% of the time. A hard
+    freeze has no way back once it starts from a bad value; asymmetric decay
+    always converges.
     """
 
-    __slots__ = ("_freeze_ratio", "_alpha", "_n", "_value")
+    __slots__ = ("_alpha_down", "_alpha_up", "_n", "_value", "_warm_samples")
 
-    def __init__(self, halflife: float = 2000.0, freeze_ratio: float = 2.0) -> None:
-        if halflife <= 0.0:
-            raise ValueError("halflife must be positive")
-        self._alpha = 1.0 - math.exp(-math.log(2.0) / halflife)
-        self._freeze_ratio = freeze_ratio
+    def __init__(
+        self,
+        halflife: float = 3000.0,
+        fall_halflife: float = 600.0,
+        warm_samples: int = 200,
+    ) -> None:
+        if halflife <= 0.0 or fall_halflife <= 0.0:
+            raise ValueError("halflives must be positive")
+        self._alpha_up = 1.0 - math.exp(-math.log(2.0) / halflife)
+        self._alpha_down = 1.0 - math.exp(-math.log(2.0) / fall_halflife)
+        self._warm_samples = warm_samples
         self._value = 0.0
         self._n = 0
 
     @property
     def warm(self) -> bool:
-        return self._n >= 200
+        """False until enough samples have landed. The breaker must not arm
+        before this -- an unconverged baseline produces meaningless ratios."""
+        return self._n >= self._warm_samples
 
     @property
     def value(self) -> float:
@@ -124,12 +142,17 @@ class VolatilityBaseline:
     def update(self, sigma: float) -> float:
         if sigma <= 0.0:
             return self._value
-        if self._n == 0:
-            self._value = sigma
-        elif self._value <= 0.0 or sigma < self._freeze_ratio * self._value:
-            self._value += self._alpha * (sigma - self._value)
-        # else: a spike is in progress -- hold the baseline where it was.
         self._n += 1
+        if self._value <= 0.0:
+            self._value = sigma
+            return self._value
+        # During warm-up, track hard in both directions so the baseline reaches
+        # a sensible level before any asymmetry is applied.
+        if self._n < self._warm_samples:
+            self._value += 0.05 * (sigma - self._value)
+            return self._value
+        alpha = self._alpha_up if sigma > self._value else self._alpha_down
+        self._value += alpha * (sigma - self._value)
         return self._value
 
     def reset(self) -> None:
