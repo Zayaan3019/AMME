@@ -39,7 +39,15 @@ services:
     # appendonly keeps the streams across a restart, so a crash does not lose
     # the in-flight pipeline. `--save ""` disables RDB snapshots: AOF alone is
     # the right trade for an append-heavy event log.
-    command: redis-server --appendonly yes --save "" --maxmemory 512mb --maxmemory-policy noeviction
+    #
+    # maxmemory is 2x the worst-case stream footprint (8 streams x 20k entries
+    # x ~900B ~= 145MB) so MAXLEN trimming, not the memory ceiling, is what
+    # bounds growth. `noeviction` is kept deliberately: evicting stream entries
+    # would silently corrupt consumer-group state, so the correct behaviour on
+    # exhaustion is to refuse the write and let the producer degrade -- which
+    # it now does, rather than crashing. Reaching this ceiling at all means
+    # AMME_STREAM_MAXLEN is mis-sized.
+    command: redis-server --appendonly yes --save "" --maxmemory 1gb --maxmemory-policy noeviction
     ports: ["6379:6379"]
     volumes: [redis-data:/data]
     healthcheck:

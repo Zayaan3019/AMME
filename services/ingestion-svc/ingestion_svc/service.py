@@ -23,6 +23,7 @@ from amme_shared.events import OrderBookUpdate, TradeTick
 from amme_shared.metrics import (
     BOOK_RESYNCS,
     EVENT_STALENESS,
+    EVENTS_FAILED,
     EVENTS_PUBLISHED,
     MID_PRICE,
     WS_RECONNECTS,
@@ -67,6 +68,7 @@ class IngestionService(StreamService):
         self._book_buffer: list[OrderBookUpdate] = []
         self._trade_buffer: list[TradeTick] = []
         self._last_publish_monotonic = 0.0
+        self._publish_failures = 0
         self._flush_task: asyncio.Task[None] | None = None
 
         self.add_health_check("redis", self._check_redis)
@@ -168,6 +170,39 @@ class IngestionService(StreamService):
                 "persist_failed", books=len(books), trades=len(trades), error=str(exc)
             )
 
+    async def _publish(self, stream: str, event: OrderBookUpdate | TradeTick) -> bool:
+        """Publish one event. Returns False if it was dropped.
+
+        A publish failure must never kill this service. It did once: Redis hit
+        its memory ceiling under a mis-sized ``MAXLEN``, ``XADD`` raised
+        ``OutOfMemoryError``, the exception escaped ``run_loop``, and the whole
+        ingestion process died -- taking the WebSocket connection and the
+        synchronised book with it. Recovering from that costs a full snapshot
+        resync and seconds of blindness.
+
+        Dropping one tick is strictly cheaper than losing the connection, so
+        transient transport failures are counted and swallowed. The drop is
+        visible in ``amme_events_failed_total``, and the freshness health check
+        turns a *sustained* failure into an unhealthy signal within 15s -- so
+        this degrades loudly without being fatal.
+        """
+        try:
+            await self.bus.publish(stream, event)
+        except Exception as exc:
+            self._publish_failures += 1
+            EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
+            if self._publish_failures % 100 == 1:
+                self.log.error(
+                    "publish_failed_dropping_event",
+                    stream=stream,
+                    error=f"{type(exc).__name__}: {exc}",
+                    consecutive=self._publish_failures,
+                )
+            return False
+        self._publish_failures = 0
+        EVENTS_PUBLISHED.labels(self.name, stream).inc()
+        return True
+
     # -- main loop ---------------------------------------------------------
     async def run_loop(self) -> None:
         symbol = self.settings.market.symbol
@@ -184,16 +219,13 @@ class IngestionService(StreamService):
                 prev_reconnects = self.client.stats.reconnects
 
             if isinstance(event, OrderBookUpdate):
-                await self.bus.publish(Streams.LOB_RAW, event)
-                EVENTS_PUBLISHED.labels(self.name, Streams.LOB_RAW).inc()
-                EVENT_STALENESS.labels(self.name).observe(event.staleness_ns / 1e6)
-                if event.mid_price is not None:
-                    MID_PRICE.labels(symbol).set(event.mid_price)
-                self._last_publish_monotonic = loop.time()
-                self._book_buffer.append(event)
-            else:
-                await self.bus.publish(Streams.LOB_TRADES, event)
-                EVENTS_PUBLISHED.labels(self.name, Streams.LOB_TRADES).inc()
+                if await self._publish(Streams.LOB_RAW, event):
+                    EVENT_STALENESS.labels(self.name).observe(event.staleness_ns / 1e6)
+                    if event.mid_price is not None:
+                        MID_PRICE.labels(symbol).set(event.mid_price)
+                    self._last_publish_monotonic = loop.time()
+                    self._book_buffer.append(event)
+            elif await self._publish(Streams.LOB_TRADES, event):
                 self._trade_buffer.append(event)
 
             if len(self._book_buffer) + len(self._trade_buffer) >= FLUSH_MAX_BATCH:

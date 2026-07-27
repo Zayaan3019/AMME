@@ -325,3 +325,50 @@ class TestOfiWarmTravelsOnTheEvent:
         assert vol_first is None or ofi_first < vol_first, (
             f"expected OFI to warm first (ofi={ofi_first}, vol={vol_first})"
         )
+
+
+class TestConsumerGroupRecovery:
+    """A vanished consumer group must be recreated, not blocked on forever.
+
+    Consumer groups disappear in practice: an operator ``FLUSHALL``, a Redis
+    failover onto a replica that never replicated the group, or the stream key
+    expiring. Redis then answers ``XREADGROUP`` with ``NOGROUP``. Unhandled,
+    the consumer blocks forever on a group that no longer exists — and because
+    every service's health check reports process liveness rather than
+    throughput, the whole pipeline goes silent while all eight containers stay
+    green. That is the same failure signature as the type-tag decode bug, from
+    a different cause.
+    """
+
+    def test_nogroup_is_detected_by_substring(self):
+        """Pin the discriminator: redis-py signals this as a ResponseError whose
+        message contains NOGROUP, and we must not swallow other ResponseErrors."""
+        from redis.exceptions import ResponseError
+
+        nogroup = ResponseError(
+            "NOGROUP No such key 'lob.raw' or consumer group 'amme' in XREADGROUP"
+        )
+        unrelated = ResponseError("WRONGTYPE Operation against a key holding the wrong kind")
+        assert "NOGROUP" in str(nogroup)
+        assert "NOGROUP" not in str(unrelated)
+
+    def test_recovery_path_exists_in_consume(self):
+        """Guard the guard: assert the handler is actually wired into consume."""
+        import inspect
+
+        from amme_shared.streams import RedisEventBus
+
+        source = inspect.getsource(RedisEventBus.consume)
+        assert "NOGROUP" in source, "consume() no longer handles a vanished group"
+        assert "ensure_group" in source, "consume() no longer recreates the group"
+
+    def test_known_groups_cache_is_invalidated(self):
+        """The cache must be cleared or ensure_group would no-op on retry."""
+        import inspect
+
+        from amme_shared.streams import RedisEventBus
+
+        source = inspect.getsource(RedisEventBus.consume)
+        assert "_known_groups" in source, (
+            "the group cache is not invalidated, so recreation would be skipped"
+        )

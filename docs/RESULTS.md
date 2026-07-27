@@ -29,6 +29,18 @@ Final run, with the **trained DeepLOB artifact active** (`AMME_MODEL_BACKEND=onn
 | Inference skipped (no tensor) | 0 |
 | P&L identity violations | 0 |
 
+**Final run on AVAXUSDT** (the venue the screener selected), with the retrained
+model and drift injection active:
+
+| Check | Result |
+|---|---|
+| Services healthy | 12/12 |
+| Pipeline | 2,972 books -> 649 features -> 227 drift signals -> 235 quotes -> 235 risk decisions |
+| Live quote | 6.6020 / 6.6280 around a 6.6145 mid |
+| Drift adjustment | +0.000003 (model actively moving the reservation price) |
+| DeepLOB p99 | **4.005 ms — inside the 5 ms budget** |
+| Book resyncs / decode errors | 0 / 0 |
+
 A representative live snapshot:
 
 ```
@@ -294,7 +306,7 @@ would be reporting a number without support.
 
 ## 6. Test suite
 
-**173 tests**, all passing. `ruff` clean.
+**242 tests**, all passing. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
 
 | Category | What it covers |
 |---|---|
@@ -305,6 +317,31 @@ would be reporting a number without support.
 | Determinism | Full-trajectory SHA-256; AST-walking guards against global RNG and wall-clock reads |
 | Latency budgets | Per-stage p99 assertions |
 | Config wiring | The three container-only bugs below |
+| Bug regressions | Volume conservation, NaN fail-closed, corrupt-fill rejection, forward-compatible decode |
+
+### Two capacity/robustness defects found on the second live run
+
+6. **Redis exhausted its memory and killed ingestion.** `stream_maxlen` was
+   100,000 across 8 streams; a 10-level `OrderBookUpdate` serialises to 907
+   bytes, so the worst case was ~730 MB against a 512 MB Redis with
+   `noeviction`. `XADD` raised `OutOfMemoryError`, the exception escaped
+   `run_loop`, and the ingestion process died — taking the WebSocket and the
+   synchronised book with it, which costs a full snapshot resync to recover.
+
+   Three fixes, because one would not have been enough: `stream_maxlen` sized
+   from the actual byte cost (20,000 x 8 ~= 145 MB), Redis raised to 1 GB so
+   MAXLEN trimming rather than the ceiling bounds growth, and the publish path
+   made non-fatal — a dropped tick is strictly cheaper than a lost connection,
+   and the drop is visible in `amme_events_failed_total` while the freshness
+   check still turns a *sustained* failure unhealthy within 15s.
+
+7. **A vanished consumer group wedged every consumer forever.** After a
+   `FLUSHALL`, Redis answers `XREADGROUP` with `NOGROUP`; unhandled, the
+   consumer blocks on a group that no longer exists. All eight services stayed
+   green while the pipeline was silent — the same signature as the type-tag
+   bug, from a different cause. `consume()` now detects `NOGROUP`,
+   invalidates its group cache and recreates the group. Groups also disappear
+   on failover and key expiry, so this is not only an operator-error path.
 
 ### Bugs caught by running the system rather than testing it
 

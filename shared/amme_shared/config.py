@@ -210,7 +210,15 @@ class InfraConfig(BaseSettings):
     metrics_port: int = 8000
     consumer_group: str = "amme"
     stream_maxlen: int = Field(
-        default=100_000, gt=0, description="Approximate cap per stream (XADD MAXLEN ~)"
+        default=20_000,
+        gt=0,
+        description="Approximate cap per stream (XADD MAXLEN ~). Sized against "
+        "Redis's memory limit, not picked round: a 10-level OrderBookUpdate "
+        "serialises to ~907 bytes, so the old 100k cap across 8 streams was "
+        "~730MB against a 512MB Redis. It filled, `noeviction` refused the "
+        "write, and ingestion crashed. 20k x 8 is ~145MB, comfortably inside "
+        "a 1GB limit with room for consumer-group bookkeeping. At 10 events/s "
+        "it still retains ~33 minutes of replay.",
     )
     block_ms: int = Field(default=1000, gt=0, description="XREADGROUP block timeout")
     batch_size: int = Field(default=64, gt=0)

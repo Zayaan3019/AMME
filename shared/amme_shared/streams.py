@@ -213,15 +213,34 @@ class RedisEventBus:
         cursor: dict[str, str] = dict.fromkeys(streams, "0")
 
         while True:
-            raw_response = await self._redis.xreadgroup(
-                groupname=group,
-                consumername=consumer,
-                streams=cast(
-                    "_RedisPayload", cursor if recovering else dict.fromkeys(streams, ">")
-                ),
-                count=64,
-                block=self._block_ms,
-            )
+            try:
+                raw_response = await self._redis.xreadgroup(
+                    groupname=group,
+                    consumername=consumer,
+                    streams=cast(
+                        "_RedisPayload", cursor if recovering else dict.fromkeys(streams, ">")
+                    ),
+                    count=64,
+                    block=self._block_ms,
+                )
+            except ResponseError as exc:
+                if "NOGROUP" not in str(exc):
+                    raise
+                # The consumer group vanished underneath us. Causes seen in
+                # practice: an operator FLUSHALL, a Redis failover onto a
+                # replica that never had the group, or the stream key expiring.
+                # Without this the consumer blocks forever on a group that no
+                # longer exists -- every service stays "healthy" while the
+                # entire pipeline is silently dead, which is exactly the
+                # failure mode the type-tag bug already taught us to fear.
+                log.warning("consumer_group_missing_recreating", group=group, error=str(exc))
+                self._known_groups.difference_update({(s, group) for s in streams})
+                for stream in streams:
+                    await self.ensure_group(stream, group)
+                # Start from new messages: the backlog went with the group.
+                recovering = False
+                cursor = dict.fromkeys(streams, "0")
+                continue
             # Narrowed once here -- see _redis_payload for why this is sound.
             response: _XReadGroupResponse = cast("_XReadGroupResponse", raw_response)
             if not response:

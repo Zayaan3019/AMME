@@ -167,7 +167,7 @@ make logs
 
 ```bash
 make install
-make test                # 212 tests
+make test                # 242 tests
 make regression-test     # lint + types + tests + ablation report
 ```
 
@@ -186,7 +186,7 @@ activate the drift signal.
 
 ## Testing
 
-212 tests. The ones that carry weight:
+242 tests. The ones that carry weight:
 
 **Hand-computed quant verification** — every formula checked against a value
 worked out by hand, not captured from the implementation. E.g. A-S with

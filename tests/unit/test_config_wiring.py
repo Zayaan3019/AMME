@@ -90,13 +90,19 @@ class TestBinanceUrlConstruction:
             rest_base=market.rest_base,
             depth_update_ms=market.depth_update_ms,
         )
+        # Assert the URL *structure*, not a hardcoded instrument: the default
+        # symbol is chosen by `make screen` and moves with market conditions,
+        # so pinning one here would make this test fail on a config change
+        # rather than on the regression it exists to catch.
+        symbol = market.symbol.lower()
         url = config.stream_url
         assert url == (
-            "wss://stream.binance.com:9443/stream"
-            "?streams=btcusdt@depth@100ms/btcusdt@aggTrade"
+            f"wss://stream.binance.com:9443/stream"
+            f"?streams={symbol}@depth@100ms/{symbol}@aggTrade"
         ), url
-        assert "/ws/stream" not in url
+        assert "/ws/stream" not in url, "the /ws path regression is back"
         assert config.snapshot_url.startswith("https://api.binance.com/api/v3/depth?")
+        assert market.symbol.upper() in config.snapshot_url
 
 
 class TestPolymorphicDecode:
