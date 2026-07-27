@@ -24,6 +24,7 @@ than one that stays latched a few seconds too long.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -42,6 +43,9 @@ class BreakerTrigger(StrEnum):
     DRAWDOWN = "drawdown"
     NOTIONAL = "notional"
     MANUAL = "manual"
+    #: A NaN/inf reached the risk layer. Distinct from the market triggers
+    #: because it indicates a defect upstream, not a market condition.
+    INVALID_INPUT = "invalid_input"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,8 +213,28 @@ class RiskEngine:
         self.params = params or RiskParams()
         self.breaker = CircuitBreaker(self.params)
 
+    @staticmethod
+    def _non_finite(quote: ProposedQuote, inputs: RiskInputs) -> str:
+        """Name the first non-finite field, or '' if all are sound."""
+        checks = (
+            ("inventory", inputs.inventory),
+            ("mid_price", inputs.mid_price),
+            ("total_pnl", inputs.total_pnl),
+            ("realized_vol", inputs.realized_vol),
+            ("baseline_vol", inputs.baseline_vol),
+            ("vpin", inputs.vpin),
+            ("bid_price", quote.bid_price),
+            ("ask_price", quote.ask_price),
+            ("bid_size", quote.bid_size),
+            ("ask_size", quote.ask_size),
+            ("half_spread", quote.half_spread),
+        )
+        return next((name for name, value in checks if not math.isfinite(value)), "")
+
     def utilisation(self, inventory: float) -> float:
-        return abs(inventory) / self.params.q_max if self.params.q_max > 0 else 0.0
+        if not math.isfinite(inventory) or self.params.q_max <= 0:
+            return 0.0
+        return abs(inventory) / self.params.q_max
 
     def skew_for(self, inventory: float, half_spread: float) -> float:
         """Extra centre shift, in price units, beyond what A-S already applies.
@@ -232,6 +256,25 @@ class RiskEngine:
 
     def evaluate(self, quote: ProposedQuote, inputs: RiskInputs) -> RiskOutcome:
         p = self.params
+
+        # --- NaN is the risk layer's worst adversary --------------------------
+        # Every IEEE-754 comparison against NaN is False, so `abs(q) >= q_unwind`,
+        # `q + size > q_max` and every other bound below silently pass. A single
+        # NaN inventory therefore turns the entire risk engine into a no-op while
+        # it continues to report APPROVE -- the most dangerous failure mode in the
+        # system, because it looks exactly like normal operation.
+        #
+        # Fail closed: refuse to authorise anything we cannot bound.
+        bad = self._non_finite(quote, inputs)
+        if bad:
+            return RiskOutcome(
+                verdict=RiskVerdict.HALT,
+                reason=f"non-finite input: {bad}",
+                utilisation=0.0,
+                breaker_tripped=True,
+                trigger=BreakerTrigger.INVALID_INPUT,
+            )
+
         utilisation = self.utilisation(inputs.inventory)
 
         if not p.enabled:

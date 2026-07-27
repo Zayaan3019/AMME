@@ -153,7 +153,10 @@ class FeaturePipeline:
         inner loop, where pydantic validation would dominate the profile."""
         self._vpin.update(price, size, aggressor)
 
-    def _normalise_row(self, book: OrderBookUpdate, mid: float) -> np.ndarray:
+    def normalise_row(self, book: OrderBookUpdate, mid: float) -> np.ndarray:
+        """Public: the training pipeline builds its dataset with this exact
+        transform, so it must be part of the supported surface rather than
+        something `train/` reaches into privately."""
         c = self.config
         row = np.zeros(c.levels * FEATURES_PER_LEVEL, dtype=np.float32)
 
@@ -199,7 +202,7 @@ class FeaturePipeline:
 
         tensor: np.ndarray | None = None
         if self.config.emit_tensor:
-            self._rows.append(self._normalise_row(book, mid))
+            self._rows.append(self.normalise_row(book, mid))
             if self.tensor_ready:
                 tensor = np.stack(self._rows, axis=0)
 

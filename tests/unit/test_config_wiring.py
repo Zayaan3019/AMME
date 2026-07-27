@@ -142,8 +142,8 @@ class TestPolymorphicDecode:
     def test_every_registered_type_round_trips(self):
         """Guards the registry itself: a new event class added to `events.py`
         but not to EVENT_TYPES would decode as BaseEvent and fail in production."""
-        from amme_shared.events import EVENT_TYPES
         import amme_shared.events as ev
+        from amme_shared.events import EVENT_TYPES
 
         exported = {
             name for name, obj in vars(ev).items()

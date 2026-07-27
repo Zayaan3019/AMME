@@ -124,13 +124,28 @@ class TestQueuePosition:
         engine.place(Side.BID, 100.0, 1.0, level_size=0.0, ts_ns=0)
         assert engine.on_trade(100.5, 5.0, AggressorSide.SELL, ts_ns=1) == []
 
-    def test_walk_through_fills_regardless_of_queue(self, engine):
+    def test_walk_through_skips_the_queue(self, engine):
         # A print strictly BELOW our bid means the aggressor consumed every
-        # level in between, so our order was necessarily taken out.
+        # level in between, so queue position no longer protects us: we fill
+        # despite 99 units resting ahead.
+        engine.place(Side.BID, 100.0, 1.0, level_size=99.0, ts_ns=0)
+        fills = engine.on_trade(99.0, 1.0, AggressorSide.SELL, ts_ns=1)
+        assert len(fills) == 1
+        assert fills[0].size == pytest.approx(1.0)
+
+    def test_walk_through_is_still_bounded_by_trade_size(self, engine):
+        """Skipping the queue does not mean unlimited size.
+
+        This assertion previously read ``== 1.0``, encoding the over-fill bug
+        as intended behaviour: a 0.1-unit aggressor was credited with filling a
+        full 1.0-unit order. An aggressor can only ever hand over the size it
+        actually brought, however deep it swept.
+        """
         engine.place(Side.BID, 100.0, 1.0, level_size=99.0, ts_ns=0)
         fills = engine.on_trade(99.0, 0.1, AggressorSide.SELL, ts_ns=1)
         assert len(fills) == 1
-        assert fills[0].size == pytest.approx(1.0)
+        assert fills[0].size == pytest.approx(0.1)
+        assert engine.active_order(Side.BID).remaining == pytest.approx(0.9)
 
     def test_cancellations_ahead_improve_queue_position(self, engine):
         # Level shrinks 10 -> 5 with no trade: those were cancellations, and

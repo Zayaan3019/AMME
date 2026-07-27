@@ -168,7 +168,7 @@ def features_from_stream(
         snapshot = pipeline.on_book(book)
         if snapshot is None:
             continue
-        rows.append(pipeline._normalise_row(book, snapshot.mid_price))
+        rows.append(pipeline.normalise_row(book, snapshot.mid_price))
         mids.append(snapshot.mid_price)
 
     if not rows:

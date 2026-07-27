@@ -52,7 +52,6 @@ from amme_shared.events import (
     OrderBookUpdate,
     PriceLevel,
     TradeTick,
-    new_id,
 )
 
 
@@ -166,6 +165,18 @@ class MarketSimulator:
         self._initialise_book()
 
     # -- setup -------------------------------------------------------------
+    def _event_id(self, kind: str, index: int = 0) -> str:
+        """Deterministic, collision-free id derived from seed and sequence.
+
+        The simulator previously used ``new_id()`` (uuid4), which made every
+        emitted event carry a random correlation id. P&L still replayed
+        identically because the digest ignores ids, but the s.6.1 claim is
+        *byte-for-byte reproducibility of the events* -- and that was false.
+        Anything that keyed off correlation_id (log correlation, dedup,
+        golden-file comparison) was non-reproducible.
+        """
+        return f"sim-{self.config.seed}-{kind}-{self.state.update_id}-{index}"
+
     def _round(self, price: float) -> float:
         return round(round(price / self.config.tick_size) * self.config.tick_size, 8)
 
@@ -353,7 +364,7 @@ class MarketSimulator:
                     ts_event=self.state.t_ns,
                     ts_ingest=self.state.t_ns,
                     source=DataSource.SIMULATOR,
-                    correlation_id=new_id(),
+                    correlation_id=self._event_id("trade", len(trades)),
                     price=price,
                     size=filled,
                     aggressor=AggressorSide.BUY if is_buy else AggressorSide.SELL,
@@ -412,7 +423,7 @@ class MarketSimulator:
             ts_event=self.state.t_ns,
             ts_ingest=self.state.t_ns,
             source=DataSource.SIMULATOR,
-            correlation_id=new_id(),
+            correlation_id=self._event_id("book"),
             last_update_id=self.state.update_id,
             is_snapshot=False,
             bids=[PriceLevel(price=p, size=self.state.bids[p]) for p in bid_prices],

@@ -189,6 +189,13 @@ class FeatureVector(BaseEvent):
     )
     ofi: float = Field(description="Order flow imbalance over the configured window (Cont et al.)")
     ofi_zscore: float = Field(default=0.0, description="OFI standardised by its rolling stdev")
+    ofi_warm: bool = Field(
+        default=False,
+        description="False until the OFI window has filled. Must travel with the "
+        "event: quoting-engine-svc previously substituted `vol_warm` for this, "
+        "arming the OFI gate on the volatility warm-up (200 samples) instead of "
+        "OFI's own (50), so the gate was both late and wrong.",
+    )
 
     # Volatility, in absolute quote-currency units per sqrt(second) -- the
     # convention Avellaneda-Stoikov requires (arithmetic BM), NOT a return vol.

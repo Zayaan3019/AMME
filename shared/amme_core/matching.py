@@ -38,10 +38,19 @@ Deliberate simplifications, stated rather than hidden:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
 from amme_shared.events import AggressorSide, Side
+
+#: Size comparisons below this count as zero. Well above float rounding on
+#: realistic quantities (1e-5 lot), far below any real order.
+_EPS = 1e-12
+
+
+def _finite(x: float) -> bool:
+    return math.isfinite(x)
 
 
 class OrderStatus(StrEnum):
@@ -112,7 +121,24 @@ class Portfolio:
     volume_traded: float = 0.0
 
     def apply_fill(self, side: Side, price: float, size: float, fee: float = 0.0) -> None:
-        if size <= 0.0:
+        """Apply one fill.
+
+        Rejects non-finite inputs loudly. A single NaN price silently turns
+        ``cash`` into NaN, and from there every P&L figure, Sharpe, drawdown
+        and the health check's own identity test become NaN -- which compares
+        False against every threshold, so nothing alerts and the run reports
+        plausible-looking garbage. Failing at the boundary is the only place
+        this is cheap to catch.
+        """
+        if not (_finite(price) and _finite(size) and _finite(fee)):
+            raise ValueError(
+                f"non-finite fill rejected: price={price} size={size} fee={fee}"
+            )
+        if size < 0.0:
+            raise ValueError(f"negative fill size {size}; use the opposite side instead")
+        if price <= 0.0:
+            raise ValueError(f"non-positive fill price {price}")
+        if size <= _EPS:
             return
         signed = size if side is Side.BID else -size
 
@@ -302,53 +328,90 @@ class MatchingEngine:
             # Size added to a level always joins behind us -> no change.
             order.level_size_seen = current
 
+    def _matchable(self, aggressor: AggressorSide, price: float) -> list[RestingOrder]:
+        """Our active orders this trade could reach, in exchange priority order.
+
+        Price priority is applied explicitly rather than relying on dict
+        insertion order: a sweep fills the most aggressive resting orders
+        first, and iterating in insertion order would make fill attribution
+        depend on the order we happened to place quotes in.
+        """
+        side = Side.BID if aggressor is AggressorSide.SELL else Side.ASK
+        candidates = [
+            o
+            for o in self.orders.values()
+            if o.is_active
+            and o.side is side
+            and (price <= o.price if side is Side.BID else price >= o.price)
+        ]
+        # Best price first: highest bid, lowest ask.
+        candidates.sort(key=lambda o: o.price, reverse=side is Side.BID)
+        return candidates
+
     def on_trade(
         self, price: float, size: float, aggressor: AggressorSide, ts_ns: int
     ) -> list[SimFill]:
-        """Apply an incoming aggressive trade against our resting orders."""
+        """Apply an incoming aggressive trade against our resting orders.
+
+        **Volume is conserved.** An aggressor with ``size`` units to spend can
+        never fill more than ``size`` units of our orders in total, including
+        through-fills. That sounds obvious and was previously violated: a
+        through-fill assigned ``order.remaining`` without drawing down the
+        trade's volume, so a 0.001 BTC print walking through two 5 BTC orders
+        filled 10 BTC -- a 10,000x over-fill that inflated P&L, fill counts and
+        every metric derived from them.
+
+        The physical argument for the old behaviour was that a trade printing
+        *through* our price must have consumed our order on the way. That is
+        true only up to the aggressor's actual size: if the sweep had 0.001
+        units left when it reached our price, it takes 0.001 units, not five
+        BTC. Priority still applies -- a through-fill skips the queue, because
+        everything ahead of us was consumed to get there -- but the budget does
+        not.
+        """
+        if not _finite(price) or not _finite(size):
+            raise ValueError(f"non-finite trade: price={price} size={size}")
+        if size <= 0.0:
+            return []
+
         fills: list[SimFill] = []
         remaining_volume = size
 
-        for order in self.orders.values():
-            if not order.is_active or remaining_volume <= 0.0:
-                continue
+        for order in self._matchable(aggressor, price):
+            if remaining_volume <= _EPS:
+                break
             if ts_ns < order.created_ns:
                 continue  # not yet at the exchange (latency model)
 
-            # A bid is filled by sell-aggressor flow; an ask by buy-aggressor.
-            if order.side is Side.BID:
-                if aggressor is AggressorSide.BUY or price > order.price:
-                    continue
-                through = price < order.price
-            else:
-                if aggressor is AggressorSide.SELL or price < order.price:
-                    continue
-                through = price > order.price
+            through = price < order.price if order.side is Side.BID else price > order.price
 
             if through and self.params.walk_through_fills:
-                # The aggressor cleared every level between, so our order was
-                # consumed on the way. Queue position is irrelevant here.
-                fill_size = order.remaining
+                # Everything between was consumed to reach this price, so our
+                # queue position is irrelevant -- but the aggressor's remaining
+                # size still bounds what we receive.
                 order.queue_ahead = 0.0
+                available = remaining_volume
             else:
                 consumed = min(remaining_volume, order.queue_ahead)
                 order.queue_ahead -= consumed
                 available = remaining_volume - consumed
-                if available <= 0.0:
+                if available <= _EPS:
+                    # The whole trade went to the queue ahead of us.
                     remaining_volume = 0.0
-                    continue
-                fill_size = min(order.remaining, available)
+                    break
 
-            if fill_size <= 0.0:
+            fill_size = min(order.remaining, available)
+            if fill_size <= _EPS:
                 continue
 
             fee = order.price * fill_size * self.params.maker_fee_bps / 10_000.0
             self.portfolio.apply_fill(order.side, order.price, fill_size, fee)
             order.filled += fill_size
             order.status = (
-                OrderStatus.FILLED if order.remaining <= 1e-15 else OrderStatus.PARTIAL
+                OrderStatus.FILLED if order.remaining <= _EPS else OrderStatus.PARTIAL
             )
             order.level_size_seen = max(0.0, order.level_size_seen - fill_size)
+            remaining_volume = max(0.0, remaining_volume - fill_size)
 
             fills.append(
                 SimFill(
@@ -361,8 +424,6 @@ class MatchingEngine:
                     ts_ns=ts_ns,
                 )
             )
-            if not through:
-                remaining_volume = max(0.0, remaining_volume - fill_size)
 
         return fills
 

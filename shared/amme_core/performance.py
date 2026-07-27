@@ -92,6 +92,29 @@ class PerformanceMetrics:
         return asdict(self)
 
 
+def _reject_non_finite(points: Sequence[PnLPoint]) -> None:
+    """Refuse to summarise a trajectory containing NaN or inf.
+
+    NaN propagates through mean, stdev and cumulative max, so a single corrupt
+    sample yields ``sharpe=nan`` and ``max_drawdown=nan``. Those then compare
+    False against every threshold -- including the ablation's own pass/fail
+    gates -- so a broken run is silently reported as merely unremarkable.
+    Better to fail the report than to publish a table that cannot be trusted.
+    """
+    for i, p in enumerate(points):
+        for name, value in (
+            ("total_pnl", p.total_pnl),
+            ("realized_pnl", p.realized_pnl),
+            ("inventory", p.inventory),
+            ("mid_price", p.mid_price),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"non-finite {name}={value} at sample {i} (ts={p.ts_ns}); "
+                    "refusing to compute metrics over a corrupt trajectory"
+                )
+
+
 def _resample(points: Sequence[PnLPoint], interval_seconds: float) -> np.ndarray:
     """Last-observation-carried-forward P&L on a fixed grid."""
     if len(points) < 2:
@@ -174,6 +197,8 @@ def compute_metrics(
     """Reduce a trajectory to the ablation report's row."""
     if not points:
         return _empty_metrics(strategy)
+
+    _reject_non_finite(points)
 
     duration = (points[-1].ts_ns - points[0].ts_ns) / 1e9
     pnl_grid = _resample(points, interval_seconds)

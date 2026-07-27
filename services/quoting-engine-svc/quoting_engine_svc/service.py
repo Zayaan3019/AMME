@@ -199,7 +199,7 @@ class QuotingEngineService(StreamService):
             vpin=features.vpin,
             vpin_warm=features.vpin_warm,
             ofi_zscore=features.ofi_zscore,
-            ofi_warm=features.vol_warm,
+            ofi_warm=features.ofi_warm,
             drift=drift,
             drift_confidence=confidence,
         )

@@ -14,6 +14,7 @@ idempotent or tolerant of duplicates; ``event_id`` is the natural dedup key.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
@@ -28,6 +29,21 @@ from amme_shared.logging import get_logger
 log = get_logger(__name__)
 
 E = TypeVar("E", bound=BaseEvent)
+
+
+class UnhandledEventTypeError(Exception):
+    """The envelope carries a type this consumer cannot or should not decode.
+
+    Distinct from a malformed payload: it means either a rolling deploy put a
+    newer producer ahead of this consumer, or a shared stream carries types
+    this service does not handle. Both are skip-and-continue, not crash -- but
+    they need different log lines from genuine corruption.
+    """
+
+    def __init__(self, tag: str, expected: str) -> None:
+        self.tag = tag
+        self.expected = expected
+        super().__init__(f"event type {tag!r} not handled by consumer expecting {expected}")
 
 
 class Streams:
@@ -78,6 +94,23 @@ class EventBus(Protocol):
     async def close(self) -> None: ...
 
 
+#: One place where redis-py's untyped surface is reconciled with ours.
+#:
+#: The stubs describe stream payloads as the full
+#: ``bytes | bytearray | memoryview | str | int | float`` union and responses as
+#: ``bytes | str``, because they describe the client generically without knowing
+#: whether ``decode_responses`` is set. This client is constructed with
+#: ``decode_responses=True``, so every value really is ``str``. Narrowing here --
+#: once, at the transport boundary, with the invariant stated -- keeps every
+#: other module honestly typed instead of leaking the union everywhere.
+_RedisPayload = dict[Any, Any]
+_XReadGroupResponse = list[tuple[str, list[tuple[str, dict[str, str]]]]]
+
+
+def _redis_payload(fields: dict[str, str]) -> _RedisPayload:
+    return cast("_RedisPayload", fields)
+
+
 def _encode(event: BaseEvent) -> dict[str, str]:
     return {"type": type(event).__name__, "data": event.model_dump_json()}
 
@@ -96,9 +129,20 @@ def _decode(fields: dict[str, str], event_type: type[E]) -> E:
     Look up the concrete class, verify it is compatible with what the caller
     asked for, and validate against it.
     """
-    concrete = EVENT_TYPES.get(fields.get("type", ""))
-    if concrete is not None and issubclass(concrete, event_type):
-        return cast("E", concrete.model_validate_json(fields["data"]))
+    tag = fields.get("type", "")
+    concrete = EVENT_TYPES.get(tag)
+    if concrete is not None:
+        if not issubclass(concrete, event_type):
+            # Correctly-tagged event this consumer does not handle. Not an
+            # error -- several services share a stream group.
+            raise UnhandledEventTypeError(tag, event_type.__name__)
+        decoded: E = concrete.model_validate_json(fields["data"])
+        return decoded
+    if tag:
+        # A producer newer than this consumer. Validating the payload against
+        # the requested type would raise a confusing wall of "extra field"
+        # errors; naming the real cause makes a rolling deploy diagnosable.
+        raise UnhandledEventTypeError(tag, event_type.__name__)
     return event_type.model_validate_json(fields["data"])
 
 
@@ -125,18 +169,20 @@ class RedisEventBus:
     async def publish(self, stream: str, event: BaseEvent) -> str:
         # approximate=True lets Redis trim on radix-node boundaries -- O(1)
         # amortised instead of O(n) exact trimming on every single XADD.
-        message_id: str = await self._redis.xadd(
-            stream, _encode(event), maxlen=self._maxlen, approximate=True
+        raw_id = await self._redis.xadd(
+            stream, _redis_payload(_encode(event)), maxlen=self._maxlen, approximate=True
         )
-        return message_id
+        return str(raw_id)
 
     async def publish_many(self, stream: str, events: Sequence[BaseEvent]) -> list[str]:
         if not events:
             return []
         pipe = self._redis.pipeline(transaction=False)
         for event in events:
-            pipe.xadd(stream, _encode(event), maxlen=self._maxlen, approximate=True)
-        ids: list[str] = await pipe.execute()
+            pipe.xadd(
+                stream, _redis_payload(_encode(event)), maxlen=self._maxlen, approximate=True
+            )
+        ids: list[str] = [str(i) for i in await pipe.execute()]
         return ids
 
     async def ensure_group(self, stream: str, group: str) -> None:
@@ -167,13 +213,17 @@ class RedisEventBus:
         cursor: dict[str, str] = dict.fromkeys(streams, "0")
 
         while True:
-            response = await self._redis.xreadgroup(
+            raw_response = await self._redis.xreadgroup(
                 groupname=group,
                 consumername=consumer,
-                streams=cursor if recovering else dict.fromkeys(streams, ">"),
+                streams=cast(
+                    "_RedisPayload", cursor if recovering else dict.fromkeys(streams, ">")
+                ),
                 count=64,
                 block=self._block_ms,
             )
+            # Narrowed once here -- see _redis_payload for why this is sound.
+            response: _XReadGroupResponse = cast("_XReadGroupResponse", raw_response)
             if not response:
                 if recovering:
                     recovering = False
@@ -188,7 +238,20 @@ class RedisEventBus:
                         cursor[stream_name] = message_id
                     try:
                         event = _decode(fields, event_type)
+                    except UnhandledEventTypeError as exc:
+                        # Expected during a rolling deploy, or on a shared
+                        # stream. Ack and move on; debug, not error.
+                        log.debug(
+                            "event_type_skipped",
+                            stream=stream_name,
+                            type=exc.tag,
+                            expected=exc.expected,
+                        )
+                        await self.ack(stream_name, group, message_id)
+                        continue
                     except Exception as exc:
+                        # Genuine corruption. Ack so one poison pill cannot
+                        # stall the group forever, but log loudly.
                         log.error(
                             "event_decode_failed",
                             stream=stream_name,
@@ -237,9 +300,18 @@ class InMemoryEventBus:
 
     Same interface, no Redis, strict FIFO with monotonic integer ids -- which is
     what makes the byte-for-byte replay test in s.6.1 possible.
+
+    **Semantic difference from :class:`RedisEventBus`, made explicit.**
+    ``RedisEventBus.consume`` blocks forever waiting for new messages;
+    this one returns once the backlog is drained, because a test that never
+    terminates is useless. That divergence is a trap -- a service loop verified
+    against this bus exits cleanly and would spin forever against Redis -- so it
+    is a constructor flag rather than a hidden behaviour, and
+    ``tests/unit/test_bus_semantics.py`` pins both modes.
     """
 
-    def __init__(self, maxlen: int = 100_000) -> None:
+    def __init__(self, maxlen: int = 100_000, *, stop_when_drained: bool = True) -> None:
+        self._stop_when_drained = stop_when_drained
         self._maxlen = maxlen
         self._streams: dict[str, deque[tuple[str, BaseEvent]]] = defaultdict(
             lambda: deque(maxlen=maxlen)
@@ -278,6 +350,10 @@ class InMemoryEventBus:
                     if isinstance(event, event_type):
                         yield stream, message_id, event
             if not progressed:
+                if self._stop_when_drained:
+                    return
+                # Match Redis: a live consumer waits for more.
+                await asyncio.sleep(0)
                 return
 
     def drain(self, stream: str, event_type: type[E]) -> list[E]:

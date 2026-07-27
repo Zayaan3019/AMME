@@ -164,6 +164,7 @@ class FeatureService(StreamService):
             vpin_warm=snapshot.vpin_warm,
             ofi=snapshot.ofi,
             ofi_zscore=snapshot.ofi_zscore,
+            ofi_warm=snapshot.ofi_warm,
             realized_vol=snapshot.sigma,
             realized_vol_fast=snapshot.sigma_fast,
             realized_vol_baseline=snapshot.sigma_baseline,

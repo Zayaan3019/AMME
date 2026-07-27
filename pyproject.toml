@@ -78,7 +78,7 @@ known-first-party = ["amme_shared", "amme_core", "amme_train"]
 # Typing
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_unreachable = true
 disallow_any_generics = true

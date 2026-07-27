@@ -19,7 +19,7 @@ directly, so the nesting cannot silently rot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from amme_core.avellaneda_stoikov import ASParams, AvellanedaStoikovQuoter, MarketState, Quote
@@ -113,9 +113,10 @@ class PureAvellanedaStoikovStrategy:
         # config value leak a drift term in would corrupt the baseline the
         # entire ablation is measured against.
         base = params or ASParams()
-        self.quoter = AvellanedaStoikovQuoter(
-            ASParams(**{**_as_dict(base), "drift_lambda": 0.0})
-        )
+        # dataclasses.replace, not a dict splat: it is type-checked, so a
+        # renamed or retyped field becomes a static error instead of silently
+        # falling back to a default and corrupting the ablation baseline.
+        self.quoter = AvellanedaStoikovQuoter(replace(base, drift_lambda=0.0))
 
     def decide(self, ctx: DecisionContext) -> Quote:
         state = MarketState(
@@ -174,10 +175,6 @@ class AMMEStrategy:
 
     def reset(self) -> None:
         self.gate.reset()
-
-
-def _as_dict(params: ASParams) -> dict[str, float | str]:
-    return {f: getattr(params, f) for f in ASParams.__dataclass_fields__}
 
 
 def build_strategy(

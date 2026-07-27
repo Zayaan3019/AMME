@@ -188,7 +188,8 @@ class BinanceDepthClient:
         self._session = session
         self._owns_session = session is None
         self._on_resync = on_resync
-        self._stopping = False
+        self._stopping: bool = False
+        self._stop_event = asyncio.Event()
         self._ws: ClientConnection | None = None
         #: Corrects local-vs-exchange clock skew so staleness is honest.
         #: Measured +684ms on the dev host -- see ingestion_svc.exchange.
@@ -220,14 +221,36 @@ class BinanceDepthClient:
 
     async def close(self) -> None:
         self._stopping = True
+        self._stop_event.set()
         if self._ws is not None:
             with contextlib.suppress(Exception):
                 await self._ws.close()
         if self._owns_session and self._session is not None and not self._session.closed:
             await self._session.close()
 
+    async def _wait_for_stop(self, timeout: float) -> bool:
+        """Sleep up to ``timeout``. True if a stop was requested meanwhile."""
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout)
+            return True
+        except TimeoutError:
+            return False
+
+    @property
+    def stopping(self) -> bool:
+        """Read through a property, not the attribute.
+
+        `stop()` is called from another task, so `_stopping` genuinely changes
+        under the socket loop. mypy cannot model that: it narrows the attribute
+        to False from `__init__` and marks every in-loop check unreachable.
+        Going through a property is both the honest expression of "this is
+        externally mutable" and what keeps the type checker correct.
+        """
+        return self._stopping
+
     def stop(self) -> None:
         self._stopping = True
+        self._stop_event.set()
 
     # -- REST --------------------------------------------------------------
     async def fetch_snapshot(self) -> DepthSnapshot | None:
@@ -236,7 +259,7 @@ class BinanceDepthClient:
         backoff = self.config.initial_backoff
 
         for attempt in range(1, self.config.max_snapshot_attempts + 1):
-            if self._stopping:
+            if self.stopping:
                 return None
             try:
                 self.stats.snapshot_fetches += 1
@@ -321,7 +344,7 @@ class BinanceDepthClient:
         """Connect, resync, and yield events forever. Reconnects on its own."""
         backoff = self.config.initial_backoff
 
-        while not self._stopping:
+        while not self.stopping:
             try:
                 async with websockets.connect(
                     self.config.stream_url,
@@ -344,8 +367,6 @@ class BinanceDepthClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                if self._stopping:
-                    break
                 self.stats.reconnects += 1
                 self.sync.on_disconnected()
                 # Full jitter: without it, a Binance-side blip reconnects every
@@ -357,7 +378,14 @@ class BinanceDepthClient:
                     reconnect_in=round(sleep_for, 2),
                     reconnects=self.stats.reconnects,
                 )
-                await asyncio.sleep(sleep_for)
+                # Wait on the stop event rather than the clock, so shutdown
+                # during backoff is immediate. A plain `asyncio.sleep` here
+                # meant SIGTERM could take the full 30s cap to be noticed --
+                # long enough for an orchestrator to escalate to SIGKILL and
+                # lose the buffered ticks. It also subsumes the redundant
+                # `if self.stopping: break` that used to sit above.
+                if await self._wait_for_stop(sleep_for):
+                    break
                 backoff = min(backoff * self.config.backoff_multiplier, self.config.max_backoff)
             finally:
                 self._ws = None
@@ -368,77 +396,82 @@ class BinanceDepthClient:
         connected_at = loop.time()
         snapshot_task: asyncio.Task[bool] | None = None
 
-        async for raw in ws:
-            if self._stopping:
-                return
+        # try/finally, not a trailing cleanup block: this is an async
+        # generator, so a consumer that `break`s out of it never reaches code
+        # after the loop. Without this the in-flight snapshot task is orphaned
+        # on every early exit -- and the aiohttp session it holds leaks with it.
+        try:
+            async for raw in ws:
+                if self.stopping:
+                    return
 
-            # Cycle the connection on our own schedule, before Binance's 24h
-            # limit forces it at an inconvenient moment.
-            if loop.time() - connected_at > CONNECTION_MAX_AGE_SECONDS:
-                log.info("ws_cycling", age_hours=round((loop.time() - connected_at) / 3600, 1))
-                await ws.close()
-                return
+                # Cycle the connection on our own schedule, before Binance's 24h
+                # limit forces it at an inconvenient moment.
+                if loop.time() - connected_at > CONNECTION_MAX_AGE_SECONDS:
+                    log.info("ws_cycling", age_hours=round((loop.time() - connected_at) / 3600, 1))
+                    await ws.close()
+                    return
 
-            self.stats.messages += 1
-            try:
-                message = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                self.stats.decode_errors += 1
-                continue
-
-            data = message.get("data", message)
-            event_type = data.get("e")
-
-            if event_type == "aggTrade":
-                self.stats.trade_messages += 1
+                self.stats.messages += 1
                 try:
-                    trade = parse_agg_trade(data, self.config.symbol, self.clock)
+                    message = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    self.stats.decode_errors += 1
+                    continue
+
+                data = message.get("data", message)
+                event_type = data.get("e")
+
+                if event_type == "aggTrade":
+                    self.stats.trade_messages += 1
+                    try:
+                        trade = parse_agg_trade(data, self.config.symbol, self.clock)
+                    except (KeyError, ValueError) as exc:
+                        self.stats.decode_errors += 1
+                        log.warning("trade_parse_failed", error=str(exc))
+                        continue
+                    self.stats.trades_published += 1
+                    yield trade
+                    continue
+
+                if event_type != "depthUpdate":
+                    continue
+
+                self.stats.depth_messages += 1
+                try:
+                    diff = parse_depth_diff(data)
                 except (KeyError, ValueError) as exc:
                     self.stats.decode_errors += 1
-                    log.warning("trade_parse_failed", error=str(exc))
+                    log.warning("depth_parse_failed", error=str(exc))
                     continue
-                self.stats.trades_published += 1
-                yield trade
-                continue
 
-            if event_type != "depthUpdate":
-                continue
+                self.stats.last_event_ns = (
+                    int(data.get("E", 0)) * 1_000_000 or self.clock.now_exchange_ns()
+                )
+                result = self.sync.submit_diff(diff)
 
-            self.stats.depth_messages += 1
-            try:
-                diff = parse_depth_diff(data)
-            except (KeyError, ValueError) as exc:
-                self.stats.decode_errors += 1
-                log.warning("depth_parse_failed", error=str(exc))
-                continue
+                if result.reason is not None:
+                    self.stats.note_resync(result.reason)
+                    if self._on_resync is not None:
+                        self._on_resync(result.reason)
+                    log.warning("resync_required", reason=str(result.reason), detail=result.detail)
 
-            self.stats.last_event_ns = (
-                int(data.get("E", 0)) * 1_000_000 or self.clock.now_exchange_ns()
-            )
-            result = self.sync.submit_diff(diff)
+                # Fetch the snapshot concurrently: blocking the read loop on an HTTP
+                # round trip would drop the very diffs we need to replay over it.
+                if self.sync.needs_snapshot and (snapshot_task is None or snapshot_task.done()):
+                    snapshot_task = asyncio.create_task(self._resync())
 
-            if result.reason is not None:
-                self.stats.note_resync(result.reason)
-                if self._on_resync is not None:
-                    self._on_resync(result.reason)
-                log.warning("resync_required", reason=str(result.reason), detail=result.detail)
+                if result.applied:
+                    book_event = self._build_book_event(new_id())
+                    if book_event is not None:
+                        self.stats.books_published += 1
+                        yield book_event
 
-            # Fetch the snapshot concurrently: blocking the read loop on an HTTP
-            # round trip would drop the very diffs we need to replay over it.
-            if self.sync.needs_snapshot and (snapshot_task is None or snapshot_task.done()):
-                snapshot_task = asyncio.create_task(self._resync())
-
-            if result.applied:
-                book_event = self._build_book_event(new_id())
-                if book_event is not None:
-                    self.stats.books_published += 1
-                    yield book_event
-
-        if snapshot_task is not None and not snapshot_task.done():
-            snapshot_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await snapshot_task
-
+        finally:
+            if snapshot_task is not None and not snapshot_task.done():
+                snapshot_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await snapshot_task
 
 __all__ = [
     "CONNECTION_MAX_AGE_SECONDS",

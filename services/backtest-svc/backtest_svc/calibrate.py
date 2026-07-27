@@ -119,7 +119,11 @@ class Calibrator:
         fills: list[float] = []
 
         for seed in self.seeds:
-            config = replace(self.base, seed=seed, **overrides)
+            # replace() cannot type-check a **dict splat, so build the
+            # config in two typed steps instead of one untyped one.
+            config = replace(self.base, seed=seed)
+            for field_name, value in overrides.items():
+                config = replace(config, **{field_name: value})  # type: ignore[arg-type]
             runner = BacktestRunner(config)
             result = runner.run_arm(self.arm)
             m = result.metrics

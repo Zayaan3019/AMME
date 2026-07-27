@@ -82,7 +82,7 @@ class TorchScriptPredictor:
         self._torch = torch
         self._path = Path(path)
         self.version = f"torchscript:{self._path.name}"
-        self._model = torch.jit.load(str(self._path), map_location="cpu")
+        self._model = torch.jit.load(str(self._path), map_location="cpu")  # type: ignore[no-untyped-call]
         self._model.eval()
         log.info("torchscript_loaded", path=str(self._path), threads=threads)
 
@@ -137,7 +137,8 @@ class OnnxPredictor:
 def _softmax(x: np.ndarray) -> np.ndarray:
     shifted = x - np.max(x)  # subtract max for numerical stability
     exp = np.exp(shifted)
-    return exp / np.sum(exp)
+    normalised: np.ndarray = exp / np.sum(exp)
+    return normalised
 
 
 def probabilities_to_drift(probabilities: np.ndarray, alpha_scale: float) -> tuple[float, float]:

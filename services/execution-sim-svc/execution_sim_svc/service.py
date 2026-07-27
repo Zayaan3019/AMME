@@ -213,9 +213,10 @@ class ExecutionSimService(StreamService):
             self.matching.prune()
             return
 
-        book = self._last_book
-        if book is None or decision.bid_price is None or decision.ask_price is None:
+        last_book = self._last_book
+        if last_book is None or decision.bid_price is None or decision.ask_price is None:
             return
+        book = last_book
 
         bid_size = decision.bid_size or 0.0
         ask_size = decision.ask_size or 0.0
