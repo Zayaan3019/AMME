@@ -61,6 +61,23 @@ class DeepLOBInferenceService(StreamService):
             return False, f"{type(exc).__name__}: {exc}"
 
     async def _check_inference(self) -> tuple[bool, str]:
+        """Liveness, not the latency SLO.
+
+        An earlier version returned unhealthy the moment p99 exceeded the
+        budget. That conflates two different things, and the difference matters
+        operationally: *health* answers "can this process serve requests",
+        while an *SLO* answers "is it serving them fast enough". A service that
+        is slow but correct must not be restarted -- restarting it drops the
+        warm ONNX session and the latency window, and the replacement starts
+        slower still. Under the full eight-service stack on one laptop, p99
+        measured 6.78ms against the 5ms budget, and the container flapped
+        unhealthy while working perfectly.
+
+        The breach is therefore surfaced two ways that *do* fit their purpose:
+        loudly in the detail string, and as the ``amme_inference_latency_ms``
+        histogram that Prometheus alerts on. Health fails only when the
+        predictor is genuinely unusable.
+        """
         p99 = self.p99_latency_ms()
         budget = self.settings.model.inference_p99_budget_ms
         detail = (
@@ -68,10 +85,11 @@ class DeepLOBInferenceService(StreamService):
             f"skipped={self._skipped} p99={p99:.3f}ms budget={budget}ms"
         )
         if self.predictor.version == "stub":
-            # Running on the stub is a valid state (no model trained yet), so
-            # report healthy -- but say so loudly in the detail string.
+            # A valid state (no model trained yet) -- but say so loudly.
             return True, f"DEGRADED (no model loaded): {detail}"
-        return p99 <= budget, detail
+        if p99 > budget:
+            return True, f"SLO BREACH (still serving): {detail}"
+        return True, detail
 
     def p99_latency_ms(self) -> float:
         if not self._latencies:
