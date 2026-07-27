@@ -1,0 +1,130 @@
+[project]
+name = "amme"
+version = "0.1.0"
+description = "AMME - Adaptive Market Making Engine"
+requires-python = ">=3.11"
+readme = "README.md"
+
+# The root project is a dev/meta package. Runtime deps live in shared/ and each
+# service's own pyproject.toml so that service images stay minimal.
+dependencies = [
+    "amme-shared",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.24",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+    "types-requests",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+
+# ---------------------------------------------------------------------------
+# Lint / format
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "C4",  # comprehensions
+    "UP",  # pyupgrade
+    "N",   # pep8-naming
+    "SIM", # simplify
+    "RUF",
+    "ANN", # annotations (feeds mypy --strict discipline)
+]
+ignore = [
+    "ANN401", # allow Any in narrow, documented places
+    "N803",   # quant code uses math notation (q, S, T) deliberately
+    "N806",
+    "E741",   # `l` is standard notation for a label in the DeepLOB paper
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "E501"]
+"**/tests/**" = ["ANN", "E501"]
+"train/**" = ["ANN"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["amme_shared", "amme_core", "amme_train"]
+
+# ---------------------------------------------------------------------------
+# Typing
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+mypy_path = "shared"
+explicit_package_bases = true
+exclude = ["build/", "\\.venv/", "train/notebooks/"]
+
+[[tool.mypy.overrides]]
+module = [
+    "redis.*",
+    "asyncpg.*",
+    "websockets.*",
+    "prometheus_client.*",
+    "structlog.*",
+    "torch.*",
+    "onnxruntime.*",
+    "uvicorn.*",
+    "hypothesis.*",
+    "matplotlib.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests", "shared", "services"]
+addopts = "-q --strict-markers --strict-config"
+asyncio_mode = "auto"
+markers = [
+    "integration: requires Redis/Postgres (skipped unless AMME_INTEGRATION=1)",
+    "network: reaches the public internet (skipped unless AMME_NETWORK=1)",
+    "slow: long-running regression or training test",
+    "latency: latency budget assertion, may be noisy on loaded CI runners",
+]
+filterwarnings = ["error::DeprecationWarning:amme_.*"]
+
+[tool.coverage.run]
+branch = true
+source = ["shared/amme_core", "shared/amme_shared"]
+omit = ["*/tests/*", "*/__main__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@abstractmethod",
+]
