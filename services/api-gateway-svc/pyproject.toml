@@ -5,6 +5,12 @@ description = "AMME api-gateway-svc"
 requires-python = ">=3.11"
 dependencies = [
     "amme-shared",
+    # The System view probes all eight /health endpoints concurrently under one
+    # deadline. httpx is the only runtime dependency the gateway adds over
+    # amme-shared, and it is here for the timeout semantics: urllib has no
+    # async story, so a single wedged peer would block the event loop that is
+    # also serving the WebSocket broadcast.
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -13,3 +19,17 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["api_gateway_svc"]
+
+# Explicit, not inherited. The dashboard is a tree of static assets inside the
+# package, and `pip install .` in the Dockerfile only ships what is declared
+# here -- an undeclared asset produces a container that starts, passes /health,
+# and serves a blank page. Globs are per-depth because setuptools does not
+# treat `**` as recursive in package-data.
+[tool.setuptools.package-data]
+api_gateway_svc = [
+    "static/*.html",
+    "static/*.svg",
+    "static/css/*.css",
+    "static/js/*.js",
+    "static/js/views/*.js",
+]

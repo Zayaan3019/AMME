@@ -225,6 +225,21 @@ class InfraConfig(BaseSettings):
     persist_ticks: bool = Field(default=True, description="Write lob.raw to TimescaleDB")
 
 
+class DashboardConfig(BaseSettings):
+    """api-gateway-svc's read-only projection of the pipeline."""
+
+    model_config = _env("AMME_DASH_")
+
+    peer_url_template: str = Field(
+        default="http://{name}:{port}",
+        description="How the gateway reaches its sibling services for the System "
+        "view's health fan-out. The default resolves on the compose network. "
+        "Outside Docker, set AMME_DASH_PEER_URL_TEMPLATE=http://localhost:{port} "
+        "-- the container names do not resolve on a host shell, and a probe that "
+        "cannot resolve is reported as unreachable rather than retried.",
+    )
+
+
 class BacktestConfig(BaseSettings):
     model_config = _env("AMME_BT_")
 
@@ -253,6 +268,7 @@ class Settings(BaseSettings):
     model: ModelConfig = Field(default_factory=ModelConfig)
     infra: InfraConfig = Field(default_factory=InfraConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
 
 @lru_cache(maxsize=1)
@@ -263,6 +279,7 @@ def get_settings() -> Settings:
 __all__ = [
     "AvellanedaStoikovConfig",
     "BacktestConfig",
+    "DashboardConfig",
     "InfraConfig",
     "MarketConfig",
     "ModelConfig",

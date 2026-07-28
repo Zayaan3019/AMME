@@ -22,6 +22,15 @@ htmlcov/
 data/
 artifacts/*
 !artifacts/.gitkeep
+# ...except the three the dashboard's Research view reads. They are the
+# evidence README.md and docs/RESULTS.md already quote, so committing them
+# discloses nothing new and keeps the repo self-consistent: a fresh clone
+# renders the measured results instead of an empty state. Regenerate with
+# `make ablation`, `make train`, `make screen`. The sweeps and the trained
+# model stay out -- they are large and re-derivable.
+!artifacts/ablation_multiseed.json
+!artifacts/deeplob_metrics.json
+!artifacts/venue_screen.md
 models/*.pt
 models/*.onnx
 models/*.pth

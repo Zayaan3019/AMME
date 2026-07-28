@@ -219,6 +219,12 @@ services:
     environment:
       <<: *common-env
       AMME_METRICS_PORT: "8000"
+    volumes:
+      # Read-only: the Research view renders whatever `make ablation`,
+      # `make screen` and `make train` last wrote. Mounting rather than baking
+      # means re-running the research is visible on a page refresh, and the
+      # dashboard can never show a figure that disagrees with the repo.
+      - ../artifacts:/app/artifacts:ro
     ports: ["8000:8000"]
     depends_on:
       redis: {condition: service_healthy}

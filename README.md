@@ -29,6 +29,30 @@ Binance WebSocket ─▶ ingestion ─▶ features ─▶ DeepLOB ─▶ quoting
 Eight independently deployable services over Redis Streams, each with `/health`
 and `/metrics`, scraped by Prometheus and rendered in Grafana.
 
+## The dashboard
+
+`http://localhost:8000` — three views over the same read-only gateway.
+
+| View | What it answers |
+|---|---|
+| **Live** | What is the strategy doing right now, and why? L2 depth with our own quotes marked, the A-S quote decomposed term by term, DeepLOB's three-class drift, VPIN/OFI/σ with warm-up state, fills and the public tape. |
+| **System** | Is the pipeline whole? All eight services probed directly (not inferred from stream traffic — a service can move messages while failing its own health assertion), stream throughput, and the exact parameters the running system is using. |
+| **Research** | Does any of it work? The five-arm ablation, paired mechanism deltas, the high-/low-VPIN toxicity split, the venue screen, DeepLOB's training curve and confusion matrix, and the latency budgets. |
+
+Every figure on **Research** is read from `artifacts/` at request time — the files
+`make ablation`, `make screen` and `make train` actually wrote. Nothing is
+transcribed, so the page cannot drift from the measurements.
+
+The gateway is read-only by construction: it has no route that accepts a
+mutating HTTP method, and a test asserts it. A dashboard that can write is a
+route around the risk layer.
+
+No build step, no bundler, no CDN — the page is ES modules and CSS served
+straight from the service, so it works inside the container with no network
+egress. Charts are hand-rolled SVG against a palette validated for
+colour-vision deficiency in both light and dark mode; every chart has a
+table-view twin.
+
 **What is real:** the market data, the book reconstruction, the features, the
 model, the quoting maths, the risk layer, and the services.
 **What is simulated:** order execution. Fills are matched against the *real*
@@ -94,7 +118,7 @@ over TorchScript.
 
 ---
 
-## Three findings worth reading
+## Four findings worth reading
 
 These came out of measurement, not design, and each changed the system.
 
@@ -143,6 +167,29 @@ baseline it was supposed to improve.
 The gate now tracks a **quantile** (p90) of recent VPIN, so the parameter means
 the same thing on any venue: *react to the most toxic 10% of the tape*.
 
+### 4. A clock correction that was measured once and then trusted forever
+
+`ClockSync` re-measures the exchange offset every `resync_interval_seconds`
+(300s) — except `maybe_resync` was only ever called from the WebSocket reconnect
+path. On a socket that stays up for hours, the offset was measured exactly once
+and the documented interval never applied.
+
+That turns a transient measurement error into a permanent one. Caught on a live
+stack while building the dashboard: the host suspended, the Docker VM's clock
+resumed ~13s behind, the socket reconnected, and `ClockSync` sampled *during the
+catch-up window* and latched `offset=-13351ms`. The VM clock corrected itself
+seconds later. The offset did not.
+
+For the next 45 minutes every latency metric in the system was wrong by 13.35
+seconds — and nothing could detect it, because staleness is *computed with the
+offset applied*. A wrong correction does not look like an error; it looks like a
+slow venue.
+
+Three changes: the resync runs on its own timer, so the damage is bounded by one
+interval; `/health` reports the *age* of the measurement, not just its value;
+and the offset is exported as `amme_clock_offset_ms`, because the only way to
+catch a bad correction is to watch the correction itself.
+
 ---
 
 ## Quick start
@@ -158,7 +205,7 @@ make logs
 
 | Service | Port | |
 |---|---|---|
-| Dashboard | 8000 | live P&L, inventory, quote ladder, fills |
+| Dashboard | 8000 | Live / System / Research |
 | Grafana | 3000 | `admin` / `admin` |
 | Prometheus | 9090 | |
 | ingestion / feature / deeplob / quoting / risk / execution / backtest | 8001–8007 | `/health`, `/metrics` |
