@@ -372,3 +372,90 @@ class TestConsumerGroupRecovery:
         assert "_known_groups" in source, (
             "the group cache is not invalidated, so recreation would be skipped"
         )
+
+
+class TestClockOffsetLatchedForever:
+    """The exchange clock offset was measured once and never re-measured.
+
+    `ClockSync.resync_interval_seconds` is 300s, but `maybe_resync` was called
+    only from the WebSocket reconnect path. On a connection that stays up for
+    hours the offset was therefore sampled exactly once, and the documented
+    interval never applied.
+
+    That converted a transient measurement error into a permanent one. Observed
+    on a live stack: the host suspended, the Docker VM's clock resumed ~13s
+    behind real time, the socket reconnected, and ClockSync sampled during the
+    catch-up window and latched offset=-13351ms. The VM clock corrected itself
+    seconds later; the offset did not. For the next 45 minutes every latency
+    metric in the system was wrong by 13.35 seconds.
+
+    The error is undetectable from staleness alone, which is what makes it
+    dangerous: staleness is *computed with the offset applied*, so a wrong
+    offset just makes the venue look slow. The fixes are a resync on a timer
+    (bounding the damage to one interval) and exporting the offset itself.
+    """
+
+    def test_a_timer_drives_resync_not_only_reconnects(self):
+        import inspect
+
+        from ingestion_svc.service import IngestionService
+
+        source = inspect.getsource(IngestionService)
+        assert "_clock_loop" in source, (
+            "clock resync is no longer on a timer; a long-lived connection will "
+            "latch its first offset measurement forever"
+        )
+        loop = inspect.getsource(IngestionService._clock_loop)
+        assert "resync_clock" in loop
+        assert "wait_for_stop" in loop, "the resync loop must be interruptible on shutdown"
+
+    def test_the_resync_task_is_started_and_cancelled(self):
+        import inspect
+
+        from ingestion_svc.service import IngestionService
+
+        assert "_clock_loop" in inspect.getsource(IngestionService.startup), (
+            "the resync task is never started"
+        )
+        assert "_clock_task" in inspect.getsource(IngestionService.shutdown), (
+            "the resync task is never cancelled, so shutdown would hang or warn"
+        )
+
+    def test_poll_is_faster_than_the_resync_interval(self):
+        # If the poll were slower, the effective refresh period would be the
+        # poll, silently overriding the interval it exists to honour.
+        from ingestion_svc.exchange import ClockSync
+        from ingestion_svc.service import CLOCK_RESYNC_POLL_SECONDS
+
+        # ClockSync is a slots dataclass, so the interval must be read off an
+        # instance -- the class attribute is a descriptor, not the value.
+        assert ClockSync().resync_interval_seconds > CLOCK_RESYNC_POLL_SECONDS
+
+    def test_offset_is_exported_as_a_metric(self):
+        # A wrong correction must be observable directly. Alerting on staleness
+        # cannot catch it, because staleness is derived from the offset.
+        from amme_shared.metrics import CLOCK_OFFSET_MS
+
+        CLOCK_OFFSET_MS.labels("AVAXUSDT").set(-13351.0)
+        assert CLOCK_OFFSET_MS.labels("AVAXUSDT")._value.get() == -13351.0
+
+    def test_health_reports_the_age_of_the_measurement(self):
+        import inspect
+
+        from ingestion_svc.service import IngestionService
+
+        source = inspect.getsource(IngestionService._check_clock)
+        assert "last_sync_monotonic" in source, (
+            "/health reports the offset but not its age, so a stale offset reads "
+            "exactly like a fresh one"
+        )
+
+    def test_a_stale_offset_is_recognised_as_stale(self):
+        import time as _time
+
+        from ingestion_svc.exchange import ClockSync
+
+        clock = ClockSync(synced=True, last_sync_monotonic=_time.monotonic())
+        assert not clock.is_stale()
+        clock.last_sync_monotonic = _time.monotonic() - clock.resync_interval_seconds - 1
+        assert clock.is_stale(), "an aged-out measurement must be re-measured"

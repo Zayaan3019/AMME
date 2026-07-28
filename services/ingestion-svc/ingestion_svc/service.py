@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 
 from amme_core.book import ResyncReason
 from amme_shared.config import Settings
@@ -22,6 +23,7 @@ from amme_shared.db import TickStore
 from amme_shared.events import OrderBookUpdate, TradeTick
 from amme_shared.metrics import (
     BOOK_RESYNCS,
+    CLOCK_OFFSET_MS,
     EVENT_STALENESS,
     EVENTS_FAILED,
     EVENTS_PUBLISHED,
@@ -41,6 +43,13 @@ FLUSH_MAX_BATCH = 500
 #: the 100ms cadence so a quiet market does not page anyone, but low enough to
 #: catch a genuinely wedged socket.
 FRESHNESS_TIMEOUT_SECONDS = 15.0
+
+#: How often to *consider* re-measuring the exchange clock. The decision to
+#: actually re-measure is ClockSync's (`resync_interval_seconds`, 300s); this is
+#: only the poll that lets that interval be honoured on a connection that never
+#: reconnects. Kept well below the resync interval so the effective refresh
+#: period is the interval itself rather than the interval plus a poll.
+CLOCK_RESYNC_POLL_SECONDS = 30.0
 
 
 class IngestionService(StreamService):
@@ -70,6 +79,7 @@ class IngestionService(StreamService):
         self._last_publish_monotonic = 0.0
         self._publish_failures = 0
         self._flush_task: asyncio.Task[None] | None = None
+        self._clock_task: asyncio.Task[None] | None = None
 
         self.add_health_check("redis", self._check_redis)
         self.add_health_check("book_synced", self._check_book)
@@ -100,7 +110,14 @@ class IngestionService(StreamService):
         clock = self.client.clock
         if not clock.synced:
             return False, "clock never synced with exchange"
-        return True, f"offset={clock.offset_ms:+.1f}ms rtt={clock.rtt_ms:.1f}ms"
+        # Age is reported because a stale offset is the failure mode that hides:
+        # the number stays plausible while the correction it feeds goes wrong,
+        # and every latency metric silently inherits the error.
+        age = time.monotonic() - clock.last_sync_monotonic
+        return True, (
+            f"offset={clock.offset_ms:+.1f}ms rtt={clock.rtt_ms:.1f}ms "
+            f"measured {age:.0f}s ago (n={clock.sync_count})"
+        )
 
     def _on_resync(self, reason: ResyncReason) -> None:
         BOOK_RESYNCS.labels(self.settings.market.symbol, reason.value).inc()
@@ -108,6 +125,10 @@ class IngestionService(StreamService):
     # -- lifecycle ---------------------------------------------------------
     async def startup(self) -> None:
         await self.client.prepare()
+        # Publish the offset from the very first measurement, not from the first
+        # timer tick: a gauge that stays unset for 30s looks identical to a
+        # service that never synced.
+        CLOCK_OFFSET_MS.labels(self.settings.market.symbol).set(self.client.clock.offset_ms)
         if self.client.filters is not None:
             self.log.info(
                 "instrument_ready",
@@ -124,6 +145,39 @@ class IngestionService(StreamService):
                 self.log.warning("timescaledb_unavailable", error=str(exc))
                 self.store = None
         self._flush_task = asyncio.create_task(self._flush_loop(), name="ingestion-flush")
+        self._clock_task = asyncio.create_task(self._clock_loop(), name="ingestion-clock")
+
+    async def _clock_loop(self) -> None:
+        """Re-measure the exchange clock offset on a timer.
+
+        This used to be driven solely by WebSocket reconnects, on the reasoning
+        that a reconnect is a natural checkpoint. It is -- but it is not a
+        *schedule*: on a connection that stays up for hours, the offset was
+        measured exactly once and `resync_interval_seconds` never applied.
+
+        That turned a transient measurement error into a permanent one. Observed
+        in production: the host suspended, the Docker VM's clock resumed ~13s
+        behind, the WebSocket reconnected, and ClockSync sampled while the VM
+        clock was still catching up and latched offset=-13351ms. The VM clock
+        corrected itself seconds later; the offset did not. Every latency metric
+        in the system was wrong by 13.35 seconds for 45 minutes, and because the
+        error lives in the correction rather than in the data, nothing else
+        could detect it -- staleness simply read 13s and looked like a slow
+        venue.
+
+        A timer bounds the damage to one resync interval, and the offset is now
+        also exported so a wrong correction is visible rather than inferred.
+        """
+        while not self.stopping:
+            if await self.wait_for_stop(CLOCK_RESYNC_POLL_SECONDS):
+                return
+            try:
+                await self.client.resync_clock()
+            except Exception as exc:
+                # A failed resync keeps the previous offset, which is the safe
+                # outcome; the next tick retries. Never let it kill ingestion.
+                self.log.warning("clock_resync_failed", error=f"{type(exc).__name__}: {exc}")
+            CLOCK_OFFSET_MS.labels(self.settings.market.symbol).set(self.client.clock.offset_ms)
 
     async def _check_db(self) -> tuple[bool, str]:
         if self.store is None:
@@ -134,10 +188,11 @@ class IngestionService(StreamService):
             return False, f"{type(exc).__name__}: {exc}"
 
     async def shutdown(self) -> None:
-        if self._flush_task is not None:
-            self._flush_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._flush_task
+        for task in (self._flush_task, self._clock_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self._flush(force=True)
         await self.client.close()
         await self.bus.close()

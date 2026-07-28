@@ -219,6 +219,15 @@ class BinanceDepthClient:
             session, self.config.symbol, self.config.rest_base
         )
 
+    async def resync_clock(self) -> None:
+        """Re-measure the exchange clock offset if it has aged out.
+
+        Public because the offset must be refreshed on a *schedule*, not only
+        when the WebSocket happens to reconnect -- see
+        ``IngestionService._clock_loop`` for the failure that motivated it.
+        """
+        await self.clock.maybe_resync(await self._ensure_session())
+
     async def close(self) -> None:
         self._stopping = True
         self._stop_event.set()

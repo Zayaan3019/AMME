@@ -101,6 +101,13 @@ BOOK_RESYNCS = Counter(
 )
 SERVICE_UP = Gauge("amme_service_up", "1 while the service loop is running", ["service"],
                    registry=REGISTRY)
+# Exported because a *wrong* correction is otherwise undetectable: staleness is
+# computed with this offset applied, so a bad offset makes the tape merely look
+# slow. Alert on a step change here, not on staleness.
+CLOCK_OFFSET_MS = Gauge(
+    "amme_clock_offset_ms", "Local minus exchange clock, as last measured", ["symbol"],
+    registry=REGISTRY
+)
 
 
 @contextmanager
@@ -130,6 +137,7 @@ CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 __all__ = [
     "BOOK_RESYNCS",
     "BREAKER_STATE",
+    "CLOCK_OFFSET_MS",
     "CONTENT_TYPE_LATEST",
     "DRIFT_SIGNAL",
     "EVENTS_CONSUMED",
