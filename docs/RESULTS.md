@@ -181,6 +181,69 @@ VPIN at 0.95 with the breaker permanently tripped. Live uses 0.5 BTC (~15s).
 
 ---
 
+---
+
+## 3b. Fee sensitivity — the deployability question
+
+`backtest_svc.calibrate` sweeping `maker_fee_bps`, 3 seeds, 400s each. Fills are
+identical across the sweep (397 every row), because a fee change does not alter
+*whether* you trade — only what each trade is worth. That makes this a clean
+read on economics alone.
+
+| Maker fee | P&L (mean ± sd) | Sharpe | Verdict |
+|---:|---:|---:|---|
+| −2.0 bps (rebate) | +3.822 ± 0.603 | 4464 | strongly profitable |
+| −1.0 bps (rebate) | +1.922 ± 0.305 | 4401 | profitable |
+| −0.5 bps (rebate) | +0.972 ± 0.156 | 4267 | profitable |
+| **0.0 bps** | **+0.022 ± 0.014** | **668** | **break-even** |
+| +0.5 bps | −0.928 ± 0.143 | −4707 | loses |
+| +1.0 bps | −1.878 ± 0.292 | −4628 | loses |
+| +10.0 bps (Binance VIP0) | **−18.980 ± 2.975** | −4534 | catastrophic |
+
+**Break-even maker fee: 0.0 bps.** The strategy has positive expectancy only at
+zero or negative fees.
+
+That is the single most important number for anyone thinking about deploying
+this, and it is not a defect — it is the economics of passive market making.
+Spread capture at these widths is measured in fractions of a basis point, so a
+fee of even half a bp per side dominates it. This is precisely why maker
+rebates exist, why VIP tiers are worth so much to real desks, and why the
+earlier note that "Binance VIP0 spot is +10bps, which no passive strategy at
+this spread survives" is now a measured result rather than an aside.
+
+The backtest default remains 0.0 bps (rebate-neutral) and is stated wherever
+results are quoted, so no number in this report is silently assuming a rebate.
+
+---
+
+## 3c. Execution realism — how much of the edge is an artefact?
+
+Sweeping the two assumptions most likely to flatter a paper backtest.
+
+| latency_sigma | own_impact | P&L | Sharpe | Fills |
+|---:|---:|---:|---:|---:|
+| 0.0 | 0.0 | +0.022 ± 0.014 | 668 | 397 |
+| 1.0 | 0.0 | +0.022 ± 0.014 | 669 | 397 |
+| 0.0 | 0.5 | +0.015 ± 0.008 | 326 | 403 |
+| 0.0 | **1.0** | **+0.015 ± 0.008** | **341** | 409 |
+
+**Own-order impact is the binding assumption.** Modelling our resting size as
+fully *displacing* real liquidity rather than adding to it costs **32% of P&L
+and roughly half the Sharpe**. The edge survives — it does not evaporate — but a
+third of it was an artefact of assuming we were free extra depth. The default
+stays at 0.0 (correct while quote size is negligible against the touch) and
+`own_impact_from_share` derives it from actual size, so the assumption now
+degrades honestly as quote size grows.
+
+**Latency tails do not bind at this cadence, and that is worth stating.**
+A log-normal tail on a 5ms median changes Sharpe by one point (668 → 669),
+because even a heavy tail on 5ms lands well inside a 100ms book update. The
+model is implemented and seeded, so it costs nothing and will matter if the
+feed cadence or the strategy's reaction time ever tightens — but claiming it
+"fixed" anything here would be false. At 100ms, latency is not the constraint.
+
+---
+
 ## 4. Inference latency
 
 Single-sample CPU inference, 1 thread, 300–400 runs after warm-up.

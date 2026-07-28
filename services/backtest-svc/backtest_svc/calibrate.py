@@ -150,6 +150,21 @@ class Calibrator:
             reason=f"only {fills_mean:.0f} fills < {self.min_fills}" if disqualified else "",
         )
 
+    def break_even(self, points: list[CalibrationPoint], key: str) -> float | None:
+        """Largest value of ``key`` at which mean P&L is still positive.
+
+        For the fee grid this is *the* deployability number: the maximum maker
+        fee the strategy survives. Reported separately from `best()` because
+        the ranking criterion (mean minus dispersion) answers a different
+        question -- "which configuration would I choose" rather than "where
+        does the edge vanish".
+        """
+        eligible = sorted(
+            (p for p in points if key in p.params and p.pnl_mean > 0),
+            key=lambda p: p.params[key],
+        )
+        return eligible[-1].params[key] if eligible else None
+
     def sweep(self, grid: dict[str, Sequence[float]]) -> CalibrationResult:
         """Full factorial sweep over ``grid``."""
         keys = list(grid)
@@ -183,10 +198,29 @@ DEFAULT_LAMBDA_GRID: dict[str, Sequence[float]] = {
     "drift_lambda": (0.0, 0.5, 1.0, 2.0, 5.0, 10.0),
 }
 
+#: Maker fees, in bps, spanning the realistic range. Negative values are
+#: rebates (several venues pay makers); 0 is rebate-neutral; +10 is Binance
+#: spot VIP0. Sweeping this answers the question that decides deployability:
+#: *at what fee does the edge disappear?* A strategy whose break-even fee is
+#: below the fee you actually pay is not a strategy.
+DEFAULT_FEE_GRID: dict[str, Sequence[float]] = {
+    "maker_fee_bps": (-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 5.0, 10.0),
+}
+
+#: Execution-realism sweep. Isolates how much of the measured edge survives a
+#: fat-tailed latency tail and own-order queue displacement -- the two
+#: assumptions most likely to be flattering a paper backtest.
+DEFAULT_REALISM_GRID: dict[str, Sequence[float]] = {
+    "latency_sigma": (0.0, 0.5, 1.0),
+    "own_impact": (0.0, 0.5, 1.0),
+}
+
 
 __all__ = [
     "DEFAULT_AS_GRID",
+    "DEFAULT_FEE_GRID",
     "DEFAULT_LAMBDA_GRID",
+    "DEFAULT_REALISM_GRID",
     "CalibrationPoint",
     "CalibrationResult",
     "Calibrator",

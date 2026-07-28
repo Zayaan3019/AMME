@@ -141,6 +141,14 @@ services:
       resources:
         limits:
           memory: 2G
+          # Reserved, not just capped. Measured p99 was 4.0ms on a quiet core
+          # and 7.6ms with all eight services contending -- the budget is 5ms,
+          # so contention, not the model, was the difference. A CPU
+          # *reservation* keeps the forward pass off a shared runqueue; the
+          # limit stops it starving the trading path in return.
+          cpus: "1.5"
+        reservations:
+          cpus: "1.0"
 
   quoting-engine-svc:
     <<: *service-defaults

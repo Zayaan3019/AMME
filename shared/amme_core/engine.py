@@ -100,13 +100,14 @@ class TradingEngine:
         feature_config: FeaturePipelineConfig | None = None,
         risk_params: RiskParams | None = None,
         matching_params: MatchingParams | None = None,
+        matching_seed: int | None = None,
         predictor: DriftPredictor | None = None,
     ) -> None:
         self.strategy = strategy
         self.config = config or EngineConfig()
         self.features = FeaturePipeline(feature_config)
         self.risk = RiskEngine(risk_params)
-        self.matching = MatchingEngine(matching_params)
+        self.matching = MatchingEngine(matching_params, seed=matching_seed)
         self.predictor = predictor
         self.result = EngineResult(strategy=strategy.name)
         self._start_ns = 0

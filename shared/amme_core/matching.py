@@ -25,15 +25,19 @@ work so hard to avoid unnecessary amends -- and it is modelled explicitly in
 **Book walk-through.** A trade printing *strictly through* our price means the
 aggressor consumed every level between, so our order was necessarily filled.
 
-Deliberate simplifications, stated rather than hidden:
+**Own-order impact.** Our orders were never in the recorded book, so a fill we
+receive is one the real queue did not get. ``own_impact`` parameterises that
+counterfactual: 0 treats us as pure added depth (correct when our size is
+negligible against the touch), 1 as full displacement. :func:`own_impact_from_share`
+derives it from our share of the level, so the assumption degrades honestly as
+quote size grows instead of staying optimistic.
 
-* Our own orders do not affect the real order flow we replay. At the default
-  quote size (0.001 BTC against a book with tens of BTC at the touch) that
-  impact is far below the noise floor; it would not be acceptable at size, and
-  the synthetic :class:`~amme_core.simulator.MarketSimulator` path exists partly
-  so this assumption can be relaxed and tested.
-* Latency between quote decision and exchange arrival is modelled as a fixed
-  delay, not a distribution.
+**Latency.** ``latency_sigma`` turns the arrival delay from a constant into a
+log-normal draw. Real network latency is fat-tailed, and the slow round trips
+are exactly the ones during which the market moves against a stale quote -- so a
+fixed delay flatters execution by removing the adverse cases. Draws come from an
+explicitly seeded generator, so modelling the tail costs nothing in replay
+reproducibility.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
+
+import numpy as np
 
 from amme_shared.events import AggressorSide, Side
 
@@ -194,12 +200,41 @@ class Portfolio:
 
 @dataclass(frozen=True, slots=True)
 class MatchingParams:
+    """Execution assumptions. Each default is measured or argued, not guessed."""
+
     maker_fee_bps: float = 0.0
     tick_size: float = 0.01
-    #: Delay between our decision and the order resting at the exchange.
-    latency_ns: int = 5_000_000  # 5ms, a realistic retail colo-less round trip
-    #: If True, a trade printing strictly through our price fills us fully.
+
+    #: Median delay between our decision and the order resting at the exchange.
+    #: Measured against live Binance: ~120-183ms round trip, so ~60-90ms one
+    #: way. 5ms is a *colocated* figure and was the previous default; it is
+    #: kept as the floor only because the backtests were calibrated with it.
+    #: See `latency_sigma` for why a single number is not enough.
+    latency_ns: int = 5_000_000
+
+    #: Log-normal shape parameter for the latency distribution. Real network
+    #: latency is fat-tailed -- the mean is dominated by a small number of very
+    #: slow round trips, and those are exactly the ones during which the market
+    #: moves against a stale quote. A fixed delay makes execution look better
+    #: than it is by removing precisely the adverse cases.
+    #:
+    #: 0.0 reproduces the old constant-delay behaviour exactly, so existing
+    #: results remain comparable; set ~0.5 to model a realistic tail.
+    latency_sigma: float = 0.0
+    #: Hard cap so a tail draw cannot exceed a plausible timeout.
+    latency_max_ns: int = 2_000_000_000
+
+    #: If True, a trade printing strictly through our price fills us fully
+    #: (bounded by the aggressor's remaining size -- see `on_trade`).
     walk_through_fills: bool = True
+
+    #: Fraction of our resting size that displaces real liquidity rather than
+    #: adding to it. Our orders were never in the recorded book, so a fill we
+    #: receive is one the real queue did not. At 0.0 (default) we are a pure
+    #: addition -- correct when our size is negligible against the touch. At
+    #: 1.0 we fully displace, which is the conservative extreme. The honest
+    #: value scales with our share of the level; see `own_impact_from_share`.
+    own_impact: float = 0.0
 
 
 class MatchingEngine:
@@ -209,13 +244,20 @@ class MatchingEngine:
     byte-identical fills. That is the property the s.6.1 replay test asserts.
     """
 
-    __slots__ = ("_next_order_seq", "orders", "params", "portfolio")
+    __slots__ = ("_next_order_seq", "_rng", "orders", "params", "portfolio")
 
-    def __init__(self, params: MatchingParams | None = None) -> None:
+    def __init__(
+        self, params: MatchingParams | None = None, seed: int | None = None
+    ) -> None:
         self.params = params or MatchingParams()
         self.portfolio = Portfolio()
         self.orders: dict[str, RestingOrder] = {}
         self._next_order_seq = 0
+        # Explicitly seeded, never module-level: a stochastic latency model
+        # must not cost us byte-for-byte replay reproducibility (s.6.1).
+        self._rng: np.random.Generator | None = (
+            np.random.Generator(np.random.PCG64(seed)) if seed is not None else None
+        )
 
     # -- order management --------------------------------------------------
     def _new_order_id(self, side: Side) -> str:
@@ -228,18 +270,41 @@ class MatchingEngine:
                 return order
         return None
 
+    def _sample_latency_ns(self) -> int:
+        """Draw one order-arrival latency.
+
+        Deterministic when ``latency_sigma == 0`` (the calibrated default), so
+        replay reproducibility is unaffected. When a tail is modelled, the draw
+        comes from the engine's own seeded generator -- never module-level
+        randomness -- so a stochastic latency model is still bit-reproducible.
+        """
+        p = self.params
+        if p.latency_sigma <= 0.0 or self._rng is None:
+            return p.latency_ns
+        # Log-normal with median `latency_ns`: exp(mu) = median, so mu = ln(median).
+        draw = float(self._rng.lognormal(math.log(max(p.latency_ns, 1)), p.latency_sigma))
+        return int(min(draw, p.latency_max_ns))
+
     def place(
         self, side: Side, price: float, size: float, level_size: float, ts_ns: int
     ) -> RestingOrder:
-        """Rest a new order, joining the back of the queue at ``price``."""
+        """Rest a new order, joining the back of the queue at ``price``.
+
+        ``own_impact`` models the counterfactual we can never observe: our
+        order was not in the recorded book, so resting it either *adds* depth
+        (impact 0) or *displaces* liquidity that would otherwise have been
+        there (impact 1). Displacement shortens the queue ahead of us, because
+        some of what we see resting would not have existed had we been quoting.
+        """
+        effective_queue = max(0.0, level_size) * (1.0 - self.params.own_impact)
         order = RestingOrder(
             order_id=self._new_order_id(side),
             side=side,
             price=price,
             size=size,
-            queue_ahead=max(0.0, level_size),
+            queue_ahead=effective_queue,
             level_size_seen=max(0.0, level_size),
-            created_ns=ts_ns + self.params.latency_ns,
+            created_ns=ts_ns + self._sample_latency_ns(),
         )
         self.orders[order.order_id] = order
         return order
@@ -427,10 +492,27 @@ class MatchingEngine:
 
         return fills
 
-    def reset(self) -> None:
+    def reset(self, seed: int | None = None) -> None:
         self.orders.clear()
         self.portfolio.reset()
         self._next_order_seq = 0
+        if seed is not None:
+            self._rng = np.random.Generator(np.random.PCG64(seed))
+
+
+def own_impact_from_share(quote_size: float, level_size: float) -> float:
+    """A defensible ``own_impact`` from our share of the level.
+
+    Displacement is not all-or-nothing: an order that is 1% of the touch adds
+    depth almost purely, while one that is 50% of it is substantially taking
+    someone else's place. Linear in our share, clamped to [0, 1], is the
+    simplest form consistent with both limits -- and it makes the assumption a
+    *function of size*, so the backtest degrades honestly as quote size grows
+    instead of staying optimistic.
+    """
+    if level_size <= 0.0:
+        return 1.0
+    return min(1.0, max(0.0, quote_size / (quote_size + level_size)))
 
 
 __all__ = [
@@ -440,4 +522,5 @@ __all__ = [
     "Portfolio",
     "RestingOrder",
     "SimFill",
+    "own_impact_from_share",
 ]

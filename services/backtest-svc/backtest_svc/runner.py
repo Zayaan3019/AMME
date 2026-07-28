@@ -167,6 +167,15 @@ class BacktestConfig:
     model_lookback: int = 50
     model_levels: int = 10
 
+    # --- execution realism -------------------------------------------------
+    #: Log-normal shape for order-arrival latency. 0.0 = constant delay, which
+    #: is what the calibration was run against; ~0.5 models the real fat tail.
+    latency_sigma: float = 0.0
+    #: Share of our resting size that displaces real liquidity rather than
+    #: adding to it. 0.0 is correct only while our size is negligible against
+    #: the touch; `own_impact_from_share` derives it honestly from quote size.
+    own_impact: float = 0.0
+
     # --- simulated market regime ------------------------------------------
     # Defaults describe a *makeable* venue, not BTCUSDT spot. That distinction
     # is deliberate and measured: 180s of live BTCUSDT (artifacts/
@@ -336,8 +345,14 @@ class BacktestRunner:
             ),
             risk_params=RiskParams(q_max=c.q_max),
             matching_params=MatchingParams(
-                maker_fee_bps=c.maker_fee_bps, tick_size=c.tick_size
+                maker_fee_bps=c.maker_fee_bps,
+                tick_size=c.tick_size,
+                latency_sigma=c.latency_sigma,
+                own_impact=c.own_impact,
             ),
+            # Seeded from the run seed so a stochastic latency model stays
+            # byte-for-byte reproducible and paired across arms.
+            matching_seed=c.seed if c.latency_sigma > 0.0 else None,
             predictor=predictor,
         )
 

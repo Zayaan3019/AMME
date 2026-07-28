@@ -297,14 +297,24 @@ returned 503, an orchestrator would restart the very thing protecting us.
 
 ## 8. Open decisions and known limitations
 
-| Area | Current | Limitation |
+### Resolved
+
+| Area | Resolution |
+|---|---|
+| Own-order impact | Modelled. `own_impact` parameterises queue displacement; `own_impact_from_share` derives it from quote size. **Measured cost: 32% of P&L, ~half the Sharpe** at full displacement. |
+| Latency model | Log-normal draw with a seeded generator, so the tail costs no reproducibility. **Measured: no effect at a 100ms cadence** (Sharpe 668 → 669) — the tail lands inside one book update. Implemented for when cadence tightens. |
+| Backtest fees | Swept. **Break-even maker fee is 0.0 bps**; at Binance VIP0 (+10bps) P&L is −18.98. Reported in RESULTS.md §3b. |
+| Drift arms | In the ablation, with a grid-searched λ. |
+| Simulator-only results | `backtest_svc.replay` backtests on ticks recorded from the live feed, causally merged. |
+| Inference budget under load | CPU reservation for `deeplob-inference-svc` in compose; contention, not the model, was the 4.0 → 7.6ms difference. |
+
+### Genuinely open
+
+| Area | Current | Why it stays open |
 |---|---|---|
-| Own-order impact | Not modelled | Fine at 0.001 BTC; wrong at size |
-| Latency model | Fixed 5ms | Real latency is a fat-tailed distribution |
-| Single symbol | One instrument | No cross-asset hedging or basis |
-| Inference budget | 4.04ms p99 (ONNX, T=50) | The paper's T=100 misses the 5ms budget at 7.06ms |
-| Drift arms | Not yet in the ablation | Awaiting the trained artifact; harness supports them |
-| Backtest fees | 0 bps maker | Binance VIP0 spot is +10bps, which no passive strategy at this spread survives |
+| Single symbol | One instrument at a time | Cross-asset hedging and basis trading are a scope expansion, not a defect. The screener ranks venues; running several concurrently needs a portfolio-level risk layer that does not exist. |
+| Counterfactual fills | Queue model over recorded flow | Replay removes the *generative model*, not the counterfactual: our orders were never in that book. Only live trading closes this, which the $0 constraint precludes. |
+| Fee dependence | Break-even at 0.0 bps | Not fixable in code. The strategy needs a rebate or a fee tier; that is a commercial fact about passive market making, and it is now measured rather than assumed. |
 
 ---
 

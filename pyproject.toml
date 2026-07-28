@@ -87,6 +87,14 @@ mypy_path = "shared"
 explicit_package_bases = true
 exclude = ["build/", "\\.venv/", "train/notebooks/"]
 
+# The research harness imports deeplob-inference-svc's predictor at runtime via
+# sys.path, deliberately: services are independent in the deployed topology, but
+# the backtester must score the model with the *same* code that serves it, or
+# evaluation silently drifts from production.
+[[tool.mypy.overrides]]
+module = ["deeplob_inference_svc.*"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = [
     "redis.*",
