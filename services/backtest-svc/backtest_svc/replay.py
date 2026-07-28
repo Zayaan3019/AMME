@@ -27,8 +27,8 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Iterator, Sequence
-from itertools import pairwise
 from dataclasses import dataclass
+from itertools import pairwise
 
 from amme_shared.db import TickStore
 from amme_shared.events import OrderBookUpdate, TradeTick
@@ -172,6 +172,52 @@ class TimescaleReplaySource:
         return merged
 
 
+def split_contiguous(
+    window: Sequence[tuple[OrderBookUpdate, list[TradeTick]]],
+    max_gap_seconds: float = 5.0,
+) -> list[list[tuple[OrderBookUpdate, list[TradeTick]]]]:
+    """Split a replay window at recording gaps.
+
+    A capture accumulated over days contains the stack's own downtime: the
+    first real recording here spanned 8,820 seconds but hid an **81-minute
+    gap** where the containers were being rebuilt. Backtesting straight across
+    such a gap is not merely noisy, it is wrong -- the strategy carries
+    inventory across a discontinuity, every rolling statistic (sigma, VPIN, the
+    OFI z-score) treats two unrelated market states as consecutive, and the
+    resulting P&L is attributed to a period that never happened.
+
+    ``max_gap_seconds`` defaults to 5s: fifty missed updates at the 100ms
+    cadence, comfortably beyond ordinary jitter and far short of a restart.
+    """
+    if not window:
+        return []
+
+    segments: list[list[tuple[OrderBookUpdate, list[TradeTick]]]] = [[window[0]]]
+    for previous, current in pairwise(window):
+        gap = (current[0].ts_event - previous[0].ts_event) / 1e9
+        if gap > max_gap_seconds:
+            segments.append([current])
+        else:
+            segments[-1].append(current)
+    return segments
+
+
+def largest_contiguous(
+    window: Sequence[tuple[OrderBookUpdate, list[TradeTick]]],
+    max_gap_seconds: float = 5.0,
+) -> list[tuple[OrderBookUpdate, list[TradeTick]]]:
+    """The longest uninterrupted stretch of the recording.
+
+    Preferred over stitching segments together: concatenation would reintroduce
+    exactly the discontinuity :func:`split_contiguous` exists to remove, just
+    with the timestamps hidden.
+    """
+    segments = split_contiguous(window, max_gap_seconds)
+    if not segments:
+        return []
+    return max(segments, key=len)
+
+
 def replay_quality(
     window: Sequence[tuple[OrderBookUpdate, list[TradeTick]]],
 ) -> dict[str, float]:
@@ -204,6 +250,8 @@ def replay_quality(
 __all__ = [
     "ReplayWindow",
     "TimescaleReplaySource",
+    "largest_contiguous",
     "merge_causally",
     "replay_quality",
+    "split_contiguous",
 ]

@@ -93,6 +93,12 @@ calibrate: ## Grid-search gamma/kappa -> artifacts/calibration.md
 screen: ## Rank live venues by market-making viability -> artifacts/venue_screen.md
 	PYTHONPATH=services/ingestion-svc $(VENV_PY) -m ingestion_svc.screener
 
+replay: ## Backtest on recorded live ticks (needs the stack to have run)
+	PYTHONPATH=services/backtest-svc $(VENV_PY) -m backtest_svc.replay_cli
+
+calibrate-lambda: ## Grid-search the drift weight -> artifacts/calibration_lambda.md
+	PYTHONPATH=services/backtest-svc $(VENV_PY) -m backtest_svc.cli 		--drift-lambda 1.0 calibrate-lambda
+
 record: ## Record live Binance data to TimescaleDB for training
 	PYTHONPATH=services/ingestion-svc $(VENV_PY) -m amme_train.record --minutes 60
 

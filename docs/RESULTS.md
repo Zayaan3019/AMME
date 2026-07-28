@@ -244,6 +244,60 @@ feed cadence or the strategy's reaction time ever tightens — but claiming it
 
 ---
 
+---
+
+## 3d. Replay on real recorded data
+
+`backtest_svc.replay` runs the harness over ticks `ingestion-svc` persisted from
+the live feed. This is the only section of this report whose market data is not
+synthetic.
+
+**The recording had to be segmented first.** The raw capture spanned 8,820
+seconds and hid an **81-minute gap** where containers were being rebuilt.
+Backtesting across that is not merely noisy, it is wrong: the strategy carries
+inventory over a discontinuity and every rolling statistic treats two unrelated
+market states as consecutive. `split_contiguous` cut the capture into 6
+segments; the largest is **16,625 books over 1,663s at exactly 10.00 Hz, max gap
+0.20s** — a clean recording.
+
+BTCUSDT, largest contiguous segment, `make replay` using the live `.env`
+parameters:
+
+| Arm | P&L | Sharpe | Fills | Inventory σ | Max DD |
+|---|---:|---:|---:|---:|---:|
+| Naive symmetric | −24.815 | −141.6 | 6986 | 0.04424 | 41.725 |
+| **Pure Avellaneda–Stoikov** | **−3.634** | **+4.1** | 1537 | 0.05093 | 58.524 |
+
+**A-S loses 6.8× less than naive and is the only arm with a positive Sharpe** —
+on real market data, with no simulator in the loop. Both still lose, which is
+the expected result and validates two earlier claims independently.
+
+First, the venue screener scored BTCUSDT **0.00 makeability** — the worst of 14
+symbols — and predicted no passive quoter has positive expectancy there. Real
+data agrees. This is the screener being right, measured on data it never saw.
+
+Second, **calibration does not transfer between venues**, which was asserted
+from the live stack pinning its half-spread to the clamp. Here it is quantified:
+γ=4/κ=40 were grid-searched on a simulator regime with a ~29-tick spread, and
+applied to a 1-tick market they quote far too wide — 960 fills against naive's
+3024, each one losing more.
+
+**A-S trades far more selectively**: 1,537 fills against naive's 6,986. On a
+venue where every fill is adversely selected, quoting less is the correct
+response, and it is the difference between losing 3.6 and losing 24.8.
+
+With simulator-calibrated parameters (γ=4, κ=40) applied to this 1-tick market
+instead, A-S quotes far too wide — 960 fills, P&L −11.4 — but holds inventory σ
+at 0.00047 against naive's 0.02570, **55× tighter**. The inventory mechanism
+does exactly what the theory says under either parameterisation; what changes
+is whether the spread is wide enough to earn against.
+
+What replay does not fix: our orders were never in that book, so fills remain
+counterfactual under the same queue model. Replay upgrades the *market data*
+from synthetic to real. It does not turn a paper backtest into live P&L.
+
+---
+
 ## 4. Inference latency
 
 Single-sample CPU inference, 1 thread, 300–400 runs after warm-up.
@@ -369,7 +423,7 @@ would be reporting a number without support.
 
 ## 6. Test suite
 
-**242 tests**, all passing. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
+**268 tests**, all passing. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
 
 | Category | What it covers |
 |---|---|
@@ -440,7 +494,7 @@ now have regression tests.
 
 ```bash
 make install
-make test                # 173 tests
+make test                # 268 tests
 make regression-test     # lint + mypy + tests + ablation
 make calibrate           # -> artifacts/calibration.md
 make ablation            # -> artifacts/ablation_multiseed.md
