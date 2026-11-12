@@ -60,7 +60,7 @@ LATENCY_BUDGETS: list[dict[str, Any]] = [
         "p50_ms": 11.44,
         "p99_ms": 15.51,
         "budget_ms": 5.0,
-        "note": "Rejected: 2.8x slower than ONNX on the same graph.",
+        "note": "Rejected: 2.2x slower than ONNX on the same graph (p99, T=100).",
     },
 ]
 

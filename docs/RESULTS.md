@@ -85,8 +85,9 @@ latency, not on the quoted spread.
 ## 2. Ablation — 10 seeds, paired, all five arms
 
 `make ablation`. Every arm sees byte-identical market data within each seed, so
-comparisons are paired. 900s per run, 90s warm-up excluded, γ=4.0, κ=40,
-λ=1.0 — all grid-searched.
+comparisons are paired. 900s per run, 90s warm-up excluded, γ=4.0, κ=40
+grid-searched; drift weight λ=1.0 (the λ grid ranked λ=0 first on its
+consistency score — see the note at the end of §5).
 
 | Arm | P&L (mean ± sd) | Sharpe (mean ± sd) | Max DD | Inventory σ | Fills | Profitable seeds |
 |---|---:|---:|---:|---:|---:|---:|
@@ -106,9 +107,18 @@ comparisons are paired. 900s per run, 90s warm-up excluded, γ=4.0, κ=40,
 | Full AMME (vs pure A-S) | +0.102 ± 0.124 | +347 | +0.00398 | 7/10 |
 | Drift on top of toxicity | +0.089 ± 0.123 | +205 | +0.00410 | 7/10 |
 
-**The build-up is monotone in both P&L and Sharpe**, which is what the spec's
-Definition of Done asks for: AMME > A-S+toxicity > pure A-S > naive. Every
-paired delta is positive and every mechanism wins the majority of seeds.
+**The build-up is monotone in P&L** — naive < pure A-S < A-S+toxicity <
+A-S+drift < AMME — and every paired delta is positive, with every mechanism
+winning the majority of seeds. **It is not monotone in Sharpe:** full AMME
+(590) sits just below A-S + drift alone (596). Adding the toxicity gate on top
+of drift buys a lower max drawdown (0.054 → 0.051) and slightly lower inventory
+σ, not a higher Sharpe; the 6-point gap is far inside the ±545 seed-to-seed
+spread, so the honest reading is "no Sharpe difference" between those two arms.
+
+Sharpe here is annualised from 900-second runs (`performance.sharpe_ratio`
+scales by √(seconds per year / interval)), so the levels are not comparable to
+a fund's annual Sharpe. They are valid for ranking arms against each other on
+identical data, and that is the only use made of them.
 
 ### Toxicity-adjusted P&L
 
@@ -328,9 +338,24 @@ the inference container to dedicated cores would be the fix in production.
 **The paper's T=100 does not fit a 5ms CPU budget on this hardware.** Two
 changes get inside it:
 
-1. **ONNX Runtime over TorchScript** — 2.8× (11.44 → 4.04 ms p99). Ahead-of-time
+1. **ONNX Runtime over TorchScript** — **2.2×** on p99 at the same lookback
+   (T=100: 15.51 → 7.06 ms; 2.1× on p50, 11.44 → 5.42 ms). Ahead-of-time
    constant folding and operator fusion.
-2. **Lookback 100 → 50** — a further 43%.
+2. **Lookback 100 → 50** — a further 43% (ONNX p99 7.06 → 4.04 ms).
+
+**Shipped configuration vs. the TorchScript starting point** (ONNX, T=50 vs.
+TorchScript, T=100), three ways of stating the same measurements:
+
+| Comparison | TorchScript T=100 | ONNX T=50 | Speed-up |
+|---|---:|---:|---:|
+| Tail vs. median: shipped **p99** against TorchScript's **p50** | 11.44 ms | 4.04 ms | **2.8×** |
+| p99 vs. p99 | 15.51 ms | 4.04 ms | 3.8× |
+| p50 vs. p50 | 11.44 ms | 2.83 ms | 4.0× |
+
+The headline figure is the conservative first row: the shipped model's 99th
+percentile is 2.8× below TorchScript's *median* — its worst case beats
+TorchScript's typical case. Of that gain, the backend alone accounts for 2.2×
+(p99 at the same lookback, above) and the shorter lookback for the rest.
 
 The full 146k-parameter model is retained; capacity was not the constraint.
 
@@ -355,50 +380,64 @@ Chronological, purged splits — never random. Consecutive windows overlap by 49
 of 50 timesteps, so a random shuffle would put window *t* in train and *t+1* in
 test and measure memorisation.
 
-| Run | Data | Splits (train/val/test) | Best val accuracy | Majority baseline |
-|---|---|---|---:|---:|
-| A | 7200s, batch 128 | 50,345 / 10,773 / 10,793 | **0.6274** | 0.443 |
-| B (shipped) | 3600s, batch 256 | 25,145 / 5,373 / 5,393 | 0.4342 | 0.405 |
+**Training data is simulator output**, not recorded Binance ticks:
+`build_from_simulator` over 7,200 simulated seconds (seed 42), lookback 50,
+10 levels, 20-step horizon, 70/15/15 chronological split. The drift arms in §2
+run on the same simulator family, so the drift gains there are measured
+in-distribution; §3d is the only real-data evaluation, and it does not include
+the drift arm.
 
-**Run A clears the majority baseline by 18.4 points** (0.627 vs 0.443) — the
-model is learning real structure, not class priors. It was stopped short of
-export for time (~10 min/epoch on CPU).
-
-**Run B is the artifact in `models/`.** Trained to completion, 8 epochs,
-146,019 parameters. Test set evaluated exactly once, after model selection:
+**The artifact in `models/`** was exported in the same run that wrote
+`artifacts/deeplob_metrics.json` — those are the numbers below. 146,019
+parameters, batch 128, splits 50,345 / 10,773 / 10,793. Training ran 8 epochs
+and early-stopped; the exported weights are the **epoch-2 checkpoint** (best
+validation macro F1, 0.552). Test set evaluated exactly once, after model
+selection:
 
 | Metric | Value |
 |---|---:|
-| Test accuracy | **0.4615** |
-| Test macro F1 | 0.4534 |
-| Majority-class baseline | 0.4050 |
-| Beats baseline | **True** (+5.7 points) |
+| Metric | DeepLOB | Majority class ("always up") | Margin |
+|---|---:|---:|---:|
+| Micro F1 (= accuracy for single-label 3-class) | **0.5214** | 0.4429 | **+7.9 pts** |
+| Macro F1 | **0.5045** | 0.2046 | +30.0 pts |
+| Weighted F1 | 0.5249 | 0.2719 | +25.3 pts |
+
+The model beats the majority baseline on every F1 averaging. Micro F1 is the
+conservative headline (+7.9 points); macro F1, which a constant predictor
+cannot game, shows the larger gap.
+
+Test class balance is down 23% / flat 33% / up 44%, against 25 / 35 / 40 in
+train.
 
 Confusion matrix (rows = true, cols = predicted; classes down/flat/up):
 
 ```
         down    flat      up
-down     708     289     440
-flat     486     578     708
-up       329     652   1,203
+down   1,072     814     582
+flat     840   1,793     912
+up       690   1,328   2,762
 ```
 
 The diagonal dominates every row, so the model discriminates all three classes
-rather than collapsing onto the majority — which is what macro F1 (0.4534,
-close to accuracy) confirms.
+rather than collapsing onto the majority — which is what macro F1 (0.5045,
+against 0.2046 for a constant "up" predictor) confirms.
 
-**It is nonetheless a weak model, and the weakness is diagnosable.** Run B
-overfits from epoch 1: training loss falls 0.70 → 0.15 while validation accuracy
-stays flat at ~0.42. Two symptoms follow — the +5.7-point edge over baseline is
-much smaller than Run A's +18.4, and the exported network is badly
-overconfident, returning `[0.001, 0.007, 0.992]` on *random* input where a
+**It is nonetheless a weak model, and the weakness is diagnosable.** It
+overfits after epoch 2: training loss falls 0.69 → 0.14 over 8 epochs while
+validation macro F1 peaks at 0.552 and drifts down to ~0.50. The exported
+network is also overconfident on out-of-distribution input: on standard-normal
+*random* tensors it returns roughly `[0.001, 0.01, 0.99]` (98–99% "up") where a
 calibrated model would be near-uniform.
 
 That overconfidence is exactly why the quoting engine's drift path has a
 confidence floor **and** a hard tick clamp: this model would otherwise assert
-strong directional views on noise. The constraint is data, not capacity — Run A
-on 2× the data was far better. The fix is `make record` to accumulate real
-Binance history, not a larger network.
+strong directional views on noise. The constraint is data, not capacity. The
+fix is training on recorded Binance history (the `ingestion-svc` TimescaleDB
+capture used by §3d), not a larger network.
+
+*An earlier draft of this section described a 3,600 s run (test accuracy
+0.4615) as the shipped artifact. That run was superseded before export; the
+table above matches the files in `models/`.*
 
 ### A data-quality bug worth recording
 
@@ -414,16 +453,20 @@ problem was that one contiguous slice of a single-pass schedule is not
 times so every chronological slice contains calm, toxic, volatile and trending
 periods while remaining strictly time-ordered and leak-free.
 
-**Drift ablation arms (`as_drift`, `amme`) are not yet in the table.** The
-harness supports them and they run under `--drift-lambda`; they are omitted
-because publishing them before λ is calibrated on a properly-trained artifact
-would be reporting a number without support.
+**λ choice.** The drift arms in §2 use λ=1. The λ grid
+(`artifacts/calibration_lambda.md`, ranked by mean − sd of P&L) put λ=0 first
+(+0.012 ± 0.019), because the drift arms carry more P&L *and* more dispersion;
+λ=1 has the higher mean (+0.041) and Sharpe (365 vs 237). Shipping λ=1 is a
+choice for mean P&L over that consistency score, and it is stated here rather
+than presented as the grid's pick.
 
 ---
 
 ## 6. Test suite
 
-**268 tests**, all passing. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
+**314 tests.** 289 run offline and pass; the other 25 are live-stack
+integration tests that skip unless `AMME_INTEGRATION=1` and `make up` is
+running. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
 
 | Category | What it covers |
 |---|---|
@@ -494,7 +537,7 @@ now have regression tests.
 
 ```bash
 make install
-make test                # 268 tests
+make test                # 314 tests (25 need the live stack)
 make regression-test     # lint + mypy + tests + ablation
 make calibrate           # -> artifacts/calibration.md
 make ablation            # -> artifacts/ablation_multiseed.md

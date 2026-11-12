@@ -67,7 +67,11 @@ because it is deterministic and reproducible.
 ### Ablation — 10 seeds, 900s each, paired, all five arms
 
 Every arm sees byte-identical market data within each seed, so comparisons are
-paired and path noise cancels. γ, κ and λ are all grid-searched, not chosen.
+paired and path noise cancels. All arms run on the built-in market simulator
+(real-data replay is in [docs/RESULTS.md §3d](docs/RESULTS.md)). γ and κ are
+grid-searched; the drift weight λ=1 is the highest-mean point on the λ grid,
+not its top-ranked one (see RESULTS §5). Sharpe is annualised from 900 s runs,
+so use it to rank arms, not as a fund-level figure.
 
 | Arm | P&L (mean ± sd) | Sharpe | Max DD | Inventory σ | Profitable seeds |
 |---|---:|---:|---:|---:|---:|
@@ -85,8 +89,10 @@ paired and path noise cancels. γ, κ and λ are all grid-searched, not chosen.
 | Toxicity gate | +0.014 | +142 | 7/10 |
 | DeepLOB drift | **+0.101** | **+353** | 8/10 |
 
-The build-up is monotone in both P&L and Sharpe — AMME > A-S+toxicity >
-pure A-S > naive — which is what the spec's Definition of Done requires.
+P&L rises at every step of the build-up — naive < pure A-S < A-S+toxicity <
+A-S+drift < AMME. Sharpe does not: full AMME (590) is level with A-S + drift
+(596), well inside the seed-to-seed spread; adding the toxicity gate on top of
+drift lowers max drawdown rather than raising Sharpe.
 
 **The sharpest result is the toxicity split.** 86% of the naive baseline's loss
 is incurred during high-VPIN periods: it is being adversely selected, exactly as
@@ -112,9 +118,12 @@ Full tables, including the earlier *incorrect* version and why it was wrong, in
 | DeepLOB inference (ONNX, T=100) | 5.42 ms | 7.06 ms | 5 ms ❌ |
 | DeepLOB inference (TorchScript, T=100) | 11.44 ms | 15.51 ms | 5 ms ❌ |
 
-The paper's T=100 does not fit a 5ms CPU budget on this hardware. Halving the
-lookback and serving via ONNX Runtime gets p99 to 4.04ms — a 2.8× improvement
-over TorchScript.
+The paper's T=100 does not fit a 5ms CPU budget on this hardware. Serving via
+ONNX Runtime at T=50 brings p99 to **4.04 ms — 2.8× below TorchScript's median
+latency at T=100** (11.44 ms), so the shipped model's tail beats TorchScript's
+typical case (p99-to-p99 the gain is 3.8×; the backend alone, at equal
+lookback, is 2.2×). These are idle-machine numbers: with the full Docker stack
+competing for CPU, ONNX p99 rises to 7.97 ms (RESULTS §4).
 
 ---
 
@@ -214,7 +223,7 @@ make logs
 
 ```bash
 make install
-make test                # 268 tests
+make test                # 314 tests (25 need the live stack)
 make regression-test     # lint + types + tests + ablation report
 ```
 
@@ -233,7 +242,8 @@ activate the drift signal.
 
 ## Testing
 
-268 tests. The ones that carry weight:
+314 tests: 289 run offline; 25 integration tests run against the live stack
+(`AMME_INTEGRATION=1`, after `make up`). The ones that carry weight:
 
 **Hand-computed quant verification** — every formula checked against a value
 worked out by hand, not captured from the implementation. E.g. A-S with
@@ -280,7 +290,7 @@ containers ran.
 | Transport | Redis Streams | Consumer groups + replayable log in a 6MB container. Kafka's ops cost buys nothing at 10 msg/s; `EventBus` is the seam if that changes. |
 | Storage | TimescaleDB | Tick storage is append-heavy; hypertables keep inserts on a small recent chunk instead of one ever-growing B-tree. |
 | Contracts | Pydantic v2 | Versioned schemas, validation at the boundary. A crossed book is rejected at parse time. |
-| ML | PyTorch → ONNX Runtime | 2.8× faster CPU inference; the only backend that meets the 5ms budget. |
+| ML | PyTorch → ONNX Runtime | At T=50, p99 2.8× below TorchScript's T=100 median (2.2× from the backend alone); the only backend that meets the 5ms budget. |
 | Observability | Prometheus + Grafana + structlog | Correlation IDs trace one tick across all 8 processes. |
 | Services | FastAPI + uvicorn | Uniform `/health` + `/metrics` even for pure stream consumers. |
 

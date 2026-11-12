@@ -190,8 +190,9 @@ class ModelConfig(BaseSettings):
     onnx_path: str = Field(default="models/deeplob.onnx")
     backend: Literal["torchscript", "onnx", "stub"] = Field(
         default="stub",
-        # onnx is ~2.8x faster than torchscript here (4.04ms vs 11.44ms p99) and
-        # is the only backend that meets the budget -- switch to it once
+        # onnx is ~2.2x faster than torchscript here (p99 7.06ms vs 15.51ms at
+        # T=100; 4.04ms at T=50) and is the only backend that meets the budget --
+        # switch to it once
         # `make train` has produced models/deeplob.onnx.
         description="'stub' emits a zero-drift, uniform-probability signal so the "
         "pipeline runs end-to-end before any model exists.",
