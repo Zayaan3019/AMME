@@ -104,7 +104,7 @@ and the drift signal turns those periods into the strategy's main earner.
 |---|---:|---:|
 | Naive symmetric | **−0.1446** | −0.0241 |
 | Pure Avellaneda–Stoikov | +0.0046 | +0.0121 |
-| **Full AMME** | **+0.0949** | +0.0335 |
+| **Full AMME** | **+0.0866** | +0.0574 |
 
 Full tables, including the earlier *incorrect* version and why it was wrong, in
 [docs/RESULTS.md](docs/RESULTS.md).

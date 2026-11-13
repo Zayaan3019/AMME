@@ -136,14 +136,14 @@ never attributed to the toxicity reading it helped cause.
 | Naive symmetric | **−0.1446** | −0.0241 | 86% |
 | Pure Avellaneda–Stoikov | +0.0046 | +0.0121 | 28% |
 | A-S + toxicity gate | +0.0143 | +0.0177 | 45% |
-| A-S + DeepLOB drift | +0.0938 | +0.0340 | 73% |
-| **Full AMME** | **+0.0949** | +0.0335 | 74% |
+| A-S + DeepLOB drift | +0.0946 | +0.0507 | 65% |
+| **Full AMME** | **+0.0866** | +0.0574 | 60% |
 
 This is the clearest single result in the report. **86% of the naive baseline's
 loss is incurred during high-VPIN periods** — it is being adversely selected,
 exactly as theory predicts. Pure A-S neutralises that (+0.0046 instead of
 −0.1446). The toxicity gate then triples high-VPIN P&L (+0.0143), and the drift
-signal turns those periods into the strategy's main earner (+0.0949).
+signal turns those periods into the strategy's main earner (+0.0866).
 
 ### Correction: these numbers supersede an earlier, wrong table
 
