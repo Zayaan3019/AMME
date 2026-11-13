@@ -39,9 +39,10 @@ is what makes the s.6.1 byte-for-byte replay assertion possible.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 
 import numpy as np
 
@@ -73,7 +74,9 @@ class RegimeParams:
     cancel_multiple: float = 1.0
 
 
-REGIME_TABLE: dict[Regime, RegimeParams] = {
+#: Read-only (rule 4: no global mutable state). A plain dict here could be
+#: edited by any importer and silently change every later simulation.
+REGIME_TABLE: Mapping[Regime, RegimeParams] = MappingProxyType({
     Regime.CALM: RegimeParams(),
     Regime.VOLATILE: RegimeParams(sigma_multiple=3.0, market_order_multiple=1.5,
                                   cancel_multiple=1.6),
@@ -81,7 +84,7 @@ REGIME_TABLE: dict[Regime, RegimeParams] = {
                                market_order_multiple=2.5, cancel_multiple=2.0),
     Regime.TRENDING: RegimeParams(sigma_multiple=1.2, drift=0.15, informed_intensity=0.35,
                                   market_order_multiple=1.2),
-}
+})
 
 
 @dataclass(frozen=True, slots=True)

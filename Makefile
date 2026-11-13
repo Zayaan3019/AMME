@@ -20,7 +20,7 @@ export PYTHONIOENCODING := utf-8
 .DEFAULT_GOAL := help
 .PHONY: help venv install env lint format typecheck test test-unit test-property \
         determinism latency regression-test calibrate ablation coverage \
-        build up down logs ps health restart clean train record smoke ci
+        build up down logs ps health restart clean train train-live record smoke ci
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -99,11 +99,16 @@ replay: ## Backtest on recorded live ticks (needs the stack to have run)
 calibrate-lambda: ## Grid-search the drift weight -> artifacts/calibration_lambda.md
 	PYTHONPATH=services/backtest-svc $(VENV_PY) -m backtest_svc.cli 		--drift-lambda 1.0 calibrate-lambda
 
-record: ## Record live Binance data to TimescaleDB for training
-	PYTHONPATH=services/ingestion-svc $(VENV_PY) -m amme_train.record --minutes 60
+record: ## Build a training set from the live stack's TimescaleDB recording (needs `make up`)
+	PYTHONPATH="train:services/backtest-svc" $(VENV_PY) -m amme_train.record --minutes 60
 
 train: ## Train DeepLOB and export TorchScript -> models/
 	PYTHONPATH=train $(VENV_PY) -m amme_train.train
+
+train-live: ## Train on data/live_dataset.npz from `make record`; writes *_live artefacts
+	PYTHONPATH=train $(VENV_PY) -m amme_train.train --dataset data/live_dataset.npz \
+		--out models/deeplob_live.ts --onnx models/deeplob_live.onnx \
+		--metrics artifacts/deeplob_metrics_live.json
 
 # ---------------------------------------------------------------- stack --
 build: env ## Build all service images

@@ -336,6 +336,21 @@ class RiskDecision(BaseEvent):
 
 
 # ---------------------------------------------------------------------------
+# risk.heartbeat -- produced by risk-svc
+# ---------------------------------------------------------------------------
+class Heartbeat(BaseEvent):
+    """Liveness signal, sent on a fixed cadence whether or not the market moves.
+
+    Decisions only flow when quotes do, and quotes only flow when the book
+    moves -- so on a quiet market "no decision" does not mean "risk is dead".
+    The dead-man's switch in execution-sim-svc listens for this instead, the
+    way an exchange's cancel-on-disconnect listens for a client heartbeat.
+    """
+
+    service: str
+
+
+# ---------------------------------------------------------------------------
 # exec.fill / exec.portfolio -- produced by execution-sim-svc
 # ---------------------------------------------------------------------------
 class Fill(BaseEvent):
@@ -384,6 +399,7 @@ EVENT_TYPES: dict[str, type[BaseEvent]] = {
     "RiskDecision": RiskDecision,
     "Fill": Fill,
     "PortfolioState": PortfolioState,
+    "Heartbeat": Heartbeat,
 }
 
 __all__ = [
@@ -395,6 +411,7 @@ __all__ = [
     "DriftSignal",
     "FeatureVector",
     "Fill",
+    "Heartbeat",
     "OrderBookUpdate",
     "PortfolioState",
     "Price",

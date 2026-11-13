@@ -10,23 +10,65 @@ without touching a line of service logic.
 
 Delivery semantics are **at-least-once**. Every consumer must therefore be
 idempotent or tolerant of duplicates; ``event_id`` is the natural dedup key.
+
+The bus enforces that for the lifetime of a consumer: each ``consume`` loop
+remembers the last :data:`DEDUP_WINDOW` event ids it delivered and drops (and
+acks) a repeat. Repeats come from a producer retrying an ``XADD`` whose reply
+was lost, or the same event published twice. Full-state events such as book
+snapshots are harmless to replay, but accumulating state is not: a duplicated
+trade would be counted twice into a VPIN bucket, and a duplicated decision would
+re-place a quote. Across a *restart* the consumer's in-memory state starts
+empty as well, so re-processing the pending backlog then is correct, not a
+duplicate.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
 from typing import Any, Final, Protocol, TypeVar, cast
 
 import redis.asyncio as aioredis
-from redis.exceptions import ResponseError
+from redis.exceptions import BusyLoadingError, ResponseError
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from amme_shared.events import EVENT_TYPES, BaseEvent
 from amme_shared.logging import get_logger
+from amme_shared.metrics import SAFETY_EVENTS
 
 log = get_logger(__name__)
+
+#: Event ids remembered per consumer loop. At the ~10-100 events/s these
+#: streams carry, this covers many minutes of traffic in a few MB.
+DEDUP_WINDOW: Final = 65_536
+
+
+class RecentIds:
+    """A bounded set of recently seen ids, oldest evicted first."""
+
+    __slots__ = ("_capacity", "_ids")
+
+    def __init__(self, capacity: int = DEDUP_WINDOW) -> None:
+        if capacity <= 0:
+            raise ValueError("capacity must be positive")
+        self._capacity = capacity
+        self._ids: OrderedDict[str, None] = OrderedDict()
+
+    def check_and_add(self, event_id: str) -> bool:
+        """True if ``event_id`` was already seen; otherwise remember it."""
+        if event_id in self._ids:
+            self._ids.move_to_end(event_id)
+            return True
+        self._ids[event_id] = None
+        if len(self._ids) > self._capacity:
+            self._ids.popitem(last=False)
+        return False
+
+    def __len__(self) -> int:
+        return len(self._ids)
 
 E = TypeVar("E", bound=BaseEvent)
 
@@ -62,6 +104,11 @@ class Streams:
         LOB_RAW, LOB_TRADES, FEATURES_READY, DRIFT_SIGNAL,
         QUOTE_INTENT, RISK_DECISION, EXEC_FILL, EXEC_PORTFOLIO,
     )
+
+    #: Control channel, not market data: risk-svc's liveness signal for the
+    #: dead-man's switch. Kept out of ``ALL``, which lists the data streams the
+    #: dashboard counts and the topology diagram draws.
+    RISK_HEARTBEAT: Final = "risk.heartbeat"
 
 
 class Message(tuple[str, BaseEvent]):
@@ -166,6 +213,33 @@ class RedisEventBus:
         result: bool = await self._redis.ping()
         return result
 
+    async def wait_ready(self, timeout_s: float = 120.0, interval_s: float = 1.0) -> None:
+        """Block until Redis answers commands, or raise after ``timeout_s``.
+
+        A Redis restarted with ``appendonly yes`` replays its log before it
+        serves anything; until then every command fails with ``LOADING``. The
+        container is already "running", so a service that starts with it used
+        to crash on its first command and rely on Docker restarting it -- and
+        compose gave up on the services that depend on it. Waiting here turns
+        that race into a short, logged pause.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._redis.ping()
+                if attempt > 1:
+                    log.info("redis_ready", attempts=attempt)
+                return
+            except (BusyLoadingError, RedisConnectionError, RedisTimeoutError, OSError) as exc:
+                if loop.time() >= deadline:
+                    raise
+                log.warning("redis_not_ready", error=f"{type(exc).__name__}: {exc}",
+                            attempt=attempt)
+                await asyncio.sleep(interval_s)
+
     async def publish(self, stream: str, event: BaseEvent) -> str:
         # approximate=True lets Redis trim on radix-node boundaries -- O(1)
         # amortised instead of O(n) exact trimming on every single XADD.
@@ -211,6 +285,7 @@ class RedisEventBus:
 
         recovering = True
         cursor: dict[str, str] = dict.fromkeys(streams, "0")
+        seen = RecentIds()
 
         while True:
             try:
@@ -279,6 +354,16 @@ class RedisEventBus:
                         )
                         await self.ack(stream_name, group, message_id)
                         continue
+                    if seen.check_and_add(event.event_id):
+                        SAFETY_EVENTS.labels(consumer, "duplicate").inc()
+                        log.debug(
+                            "duplicate_event_dropped",
+                            stream=stream_name,
+                            event_id=event.event_id,
+                            message_id=message_id,
+                        )
+                        await self.ack(stream_name, group, message_id)
+                        continue
                     yield stream_name, message_id, event
 
             if recovering and drained:
@@ -337,6 +422,7 @@ class InMemoryEventBus:
         )
         self._offsets: dict[tuple[str, str], int] = {}
         self._acked: dict[tuple[str, str], set[str]] = defaultdict(set)
+        self._seen: dict[tuple[str, str], RecentIds] = {}
         self._counter = 0
 
     async def publish(self, stream: str, event: BaseEvent) -> str:
@@ -357,6 +443,7 @@ class InMemoryEventBus:
     ) -> AsyncIterator[tuple[str, str, E]]:
         for stream in streams:
             await self.ensure_group(stream, group)
+        seen = self._seen.setdefault((group, consumer), RecentIds())
         while True:
             progressed = False
             for stream in streams:
@@ -367,6 +454,9 @@ class InMemoryEventBus:
                     self._offsets[(stream, group)] = offset + 1
                     progressed = True
                     if isinstance(event, event_type):
+                        if seen.check_and_add(event.event_id):
+                            SAFETY_EVENTS.labels(consumer, "duplicate").inc()
+                            continue
                         yield stream, message_id, event
             if not progressed:
                 if self._stop_when_drained:
@@ -383,6 +473,7 @@ class InMemoryEventBus:
         self._streams.clear()
         self._offsets.clear()
         self._acked.clear()
+        self._seen.clear()
         self._counter = 0
 
     async def ack(self, stream: str, group: str, message_id: str) -> None:
@@ -395,4 +486,12 @@ class InMemoryEventBus:
         return None
 
 
-__all__ = ["EventBus", "InMemoryEventBus", "Message", "RedisEventBus", "Streams"]
+__all__ = [
+    "DEDUP_WINDOW",
+    "EventBus",
+    "InMemoryEventBus",
+    "Message",
+    "RecentIds",
+    "RedisEventBus",
+    "Streams",
+]

@@ -94,8 +94,8 @@ consistency score — see the note at the end of §5).
 | Naive symmetric | −0.158 ± 0.329 | −392 ± 645 | 0.394 | 0.01449 | 1577 | 2/10 |
 | Pure Avellaneda–Stoikov | +0.027 ± 0.069 | 243 ± 642 | 0.073 | 0.00405 | 902 | 8/10 |
 | A-S + toxicity gate | +0.041 ± 0.072 | 385 ± 677 | 0.062 | **0.00394** | 848 | 8/10 |
-| A-S + DeepLOB drift | +0.128 ± 0.128 | **596 ± 560** | 0.054 | 0.00828 | 510 | 8/10 |
-| **Full AMME** | **+0.129 ± 0.127** | 590 ± 545 | **0.051** | 0.00803 | 474 | 8/10 |
+| A-S + DeepLOB drift | **+0.145 ± 0.137** | **472 ± 458** | 0.079 | 0.01101 | 444 | 9/10 |
+| **Full AMME** | +0.143 ± 0.177 | 425 ± 589 | 0.078 | 0.01074 | 418 | 8/10 |
 
 ### Paired component deltas — every mechanism earns its place
 
@@ -103,17 +103,22 @@ consistency score — see the note at the end of §5).
 |---|---:|---:|---:|---:|
 | A-S vs naive | **+0.185 ± 0.375** | **+635** | **−0.01043** | 8/10 |
 | Toxicity gate (vs pure A-S) | +0.014 ± 0.022 | +142 | −0.00012 | 7/10 |
-| DeepLOB drift (vs pure A-S) | **+0.101 ± 0.121** | **+353** | +0.00422 | 8/10 |
-| Full AMME (vs pure A-S) | +0.102 ± 0.124 | +347 | +0.00398 | 7/10 |
-| Drift on top of toxicity | +0.089 ± 0.123 | +205 | +0.00410 | 7/10 |
+| DeepLOB drift (vs pure A-S) | **+0.118 ± 0.154** | **+229** | +0.00695 | 8/10 |
+| Full AMME (vs pure A-S) | +0.116 ± 0.202 | +182 | +0.00669 | 8/10 |
+| Drift on top of toxicity | +0.103 ± 0.205 | +40 | +0.00681 | 8/10 |
 
-**The build-up is monotone in P&L** — naive < pure A-S < A-S+toxicity <
-A-S+drift < AMME — and every paired delta is positive, with every mechanism
-winning the majority of seeds. **It is not monotone in Sharpe:** full AMME
-(590) sits just below A-S + drift alone (596). Adding the toxicity gate on top
-of drift buys a lower max drawdown (0.054 → 0.051) and slightly lower inventory
-σ, not a higher Sharpe; the 6-point gap is far inside the ±545 seed-to-seed
-spread, so the honest reading is "no Sharpe difference" between those two arms.
+**Every paired delta is positive and every mechanism wins the majority of
+seeds**, but the build-up is not monotone at the last step. P&L rises naive <
+pure A-S < A-S+toxicity < A-S+drift; full AMME (+0.143) is level with A-S +
+drift (+0.145), and its Sharpe is lower (425 vs 472). Both gaps are far inside
+the seed-to-seed spread (±0.18 P&L, ±589 Sharpe), so the honest reading is: the
+drift signal carries the gain, and the toxicity gate adds nothing measurable on
+top of it in this simulator.
+
+Since 2026-11-13 risk enforces **post-only** (a maker bid at or above the best ask, or an ask at or below the best bid, is pulled rather than sent), in the backtest exactly as in the live service. Before that, a drift-skewed quote could cross the touch and was still filled as a maker. Only the two drift arms changed: Full AMME went from +0.129 ± 0.127 (Sharpe 590, 474 fills) to +0.143 ± 0.177 (Sharpe 425, 418 fills).
+The calibration grids, the λ grid and the sensitivity runs further down
+were produced before this change; the arms without drift are unaffected, the
+drift numbers there would shift by a similar amount.
 
 Sharpe here is annualised from 900-second runs (`performance.sharpe_ratio`
 scales by √(seconds per year / interval)), so the levels are not comparable to
@@ -464,7 +469,7 @@ than presented as the grid's pick.
 
 ## 6. Test suite
 
-**314 tests.** 289 run offline and pass; the other 25 are live-stack
+**360 tests.** 332 run offline and pass; the other 28 are live-stack
 integration tests that skip unless `AMME_INTEGRATION=1` and `make up` is
 running. `ruff` clean; `mypy --strict` clean across shared and all 8 services.
 
@@ -537,7 +542,7 @@ now have regression tests.
 
 ```bash
 make install
-make test                # 314 tests (25 need the live stack)
+make test                # 360 tests (28 need the live stack)
 make regression-test     # lint + mypy + tests + ablation
 make calibrate           # -> artifacts/calibration.md
 make ablation            # -> artifacts/ablation_multiseed.md

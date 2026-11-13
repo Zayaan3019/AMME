@@ -89,6 +89,12 @@ QUOTES_SENT = Counter("amme_quotes_total", "Quotes accepted by execution", ["sym
 RISK_DECISIONS = Counter(
     "amme_risk_decisions_total", "risk-svc verdicts", ["action", "reason"], registry=REGISTRY
 )
+SAFETY_EVENTS = Counter(
+    "amme_safety_events_total",
+    "Fail-safe actions: stale intents/decisions refused, dead-man cancels, duplicates dropped",
+    ["service", "kind"],
+    registry=REGISTRY,
+)
 BREAKER_STATE = Gauge(
     "amme_circuit_breaker_tripped", "1 = quoting halted", ["symbol"], registry=REGISTRY
 )
@@ -159,6 +165,7 @@ __all__ = [
     "REGISTRY",
     "RESERVATION_OFFSET",
     "RISK_DECISIONS",
+    "SAFETY_EVENTS",
     "SERVICE_UP",
     "STREAM_LAG",
     "TOTAL_PNL",

@@ -16,7 +16,17 @@ State it maintains independently of quoting-engine-svc:
 
 * inventory and P&L, from ``exec.portfolio`` -- never trusted from the intent
 * the circuit breaker's latch and high-water mark
-* the latest volatility/toxicity readings, from ``features.ready``
+* the latest volatility/toxicity readings and the touch, from ``features.ready``
+
+Two checks belong here rather than in the pure engine, because they are about
+the *pipeline*, not the quote:
+
+* **Stale intents are rejected.** An intent older than ``max_intent_age_ms``
+  (a backlog replayed after a restart, a stalled consumer) was priced against a
+  market that no longer exists. Approving it would put an old price on the book.
+* **The touch comes from risk's own feature feed**, so the post-only check in
+  :class:`~amme_core.risk.RiskEngine` does not trust the quoting engine's idea
+  of where the market is.
 """
 
 from __future__ import annotations
@@ -36,6 +46,7 @@ from amme_shared.config import Settings
 from amme_shared.events import (
     BaseEvent,
     FeatureVector,
+    Heartbeat,
     PortfolioState,
     QuoteIntent,
     RiskAction,
@@ -51,6 +62,7 @@ from amme_shared.metrics import (
     INVENTORY_UTILISATION,
     PROCESSING_LATENCY,
     RISK_DECISIONS,
+    SAFETY_EVENTS,
     observe_latency,
 )
 from amme_shared.service import StreamService
@@ -95,9 +107,15 @@ class RiskService(StreamService):
         self._vol_warm = False
         self._vpin = 0.0
         self._vpin_warm = False
+        self._best_bid: float | None = None
+        self._best_ask: float | None = None
+        self._max_intent_age_ns = int(r.max_intent_age_ms * 1e6)
+        self._stale_intents = 0
         self._decisions = 0
         self._halts = 0
         self._side_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._heartbeats = 0
         self.add_health_check("redis", self._check_redis)
         self.add_health_check("risk_state", self._check_state)
 
@@ -116,7 +134,8 @@ class RiskService(StreamService):
             f"inventory={self._inventory:.6g} util={self.engine.utilisation(self._inventory):.2f} "
             f"pnl={self._total_pnl:.2f} "
             f"breaker={'TRIPPED:' + breaker.trigger if breaker.tripped else 'ok'} "
-            f"trips={breaker.trip_count} decisions={self._decisions} halts={self._halts}"
+            f"trips={breaker.trip_count} decisions={self._decisions} halts={self._halts} "
+            f"stale_intents={self._stale_intents} heartbeats={self._heartbeats}"
         )
 
     async def startup(self) -> None:
@@ -124,13 +143,40 @@ class RiskService(StreamService):
         for stream in (Streams.QUOTE_INTENT, Streams.FEATURES_READY, Streams.EXEC_PORTFOLIO):
             await self.bus.ensure_group(stream, group)
         self._side_task = asyncio.create_task(self._track_state(), name="risk-state")
+        self._heartbeat_task = asyncio.create_task(self._heartbeat(), name="risk-heartbeat")
 
     async def shutdown(self) -> None:
-        if self._side_task is not None:
-            self._side_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._side_task
+        for task in (self._side_task, self._heartbeat_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.bus.close()
+
+    async def _heartbeat(self) -> None:
+        """Tell execution "risk is alive" on a fixed cadence, market or not.
+
+        Without this, the dead-man's switch could only listen for decisions,
+        which stop whenever the book is quiet -- it fired on a calm market with
+        risk perfectly healthy. A heartbeat that fails to publish is logged and
+        retried; if it keeps failing, execution stops hearing it and pulls its
+        quotes, which is the point.
+        """
+        interval = self.settings.risk.heartbeat_seconds
+        symbol = self.settings.market.symbol
+        while not self.stopping:
+            now = self.clock.now_ns()
+            try:
+                await self.bus.publish(
+                    Streams.RISK_HEARTBEAT,
+                    Heartbeat(symbol=symbol, ts_event=now, ts_ingest=now, service=self.name),
+                )
+                self._heartbeats += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.log.warning("heartbeat_failed", error=f"{type(exc).__name__}: {exc}")
+            await self.wait_for_stop(timeout=interval)
 
     async def _track_state(self) -> None:
         """Maintain risk's own view of portfolio and market state."""
@@ -160,6 +206,9 @@ class RiskService(StreamService):
                         self._vol_warm = features.vol_warm
                         self._vpin = features.vpin
                         self._vpin_warm = features.vpin_warm
+                        half = features.spread / 2.0
+                        self._best_bid = features.mid_price - half
+                        self._best_ask = features.mid_price + half
                 finally:
                     await self.bus.ack(stream, group, message_id)
         except asyncio.CancelledError:
@@ -185,11 +234,26 @@ class RiskService(StreamService):
                 EVENTS_FAILED.labels(self.name, type(exc).__name__).inc()
                 self.log.exception("risk_evaluation_failed", error=str(exc))
                 # Failing closed: if risk cannot decide, nothing is authorised.
-                await self._publish_halt(intent, symbol, f"risk error: {type(exc).__name__}")
+                await self._publish_stop(
+                    intent, symbol, RiskAction.HALT, f"risk error: {type(exc).__name__}", "error"
+                )
             finally:
                 await self.bus.ack(stream, group, message_id)
 
     async def _evaluate(self, intent: QuoteIntent, symbol: str) -> None:
+        age_ns = self.clock.now_ns() - intent.ts_ingest
+        if age_ns > self._max_intent_age_ns:
+            self._stale_intents += 1
+            SAFETY_EVENTS.labels(self.name, "stale_intent").inc()
+            await self._publish_stop(
+                intent,
+                symbol,
+                RiskAction.REJECT,
+                f"stale intent: {age_ns / 1e6:.0f} ms old > {self._max_intent_age_ns / 1e6:.0f} ms",
+                "stale_intent",
+            )
+            return
+
         proposed = ProposedQuote(
             bid_price=intent.bid_price,
             ask_price=intent.ask_price,
@@ -205,6 +269,8 @@ class RiskService(StreamService):
             baseline_vol=self._vol_baseline if self._vol_warm else 0.0,
             vpin=self._vpin if self._vpin_warm else 0.0,
             ts_ns=intent.ts_event,
+            best_bid=self._best_bid,
+            best_ask=self._best_ask,
         )
 
         with observe_latency(PROCESSING_LATENCY, self.name, "evaluate"):
@@ -245,7 +311,10 @@ class RiskService(StreamService):
         RISK_DECISIONS.labels(decision.action.value, outcome.trigger.value).inc()
         self._decisions += 1
 
-    async def _publish_halt(self, intent: QuoteIntent, symbol: str, reason: str) -> None:
+    async def _publish_stop(
+        self, intent: QuoteIntent, symbol: str, action: RiskAction, reason: str, label: str
+    ) -> None:
+        """Publish a decision that authorises nothing (REJECT or HALT)."""
         decision = RiskDecision(
             symbol=symbol,
             ts_event=intent.ts_event,
@@ -253,13 +322,14 @@ class RiskService(StreamService):
             source=intent.source,
             correlation_id=intent.correlation_id,
             intent_event_id=intent.event_id,
-            action=RiskAction.HALT,
+            action=action,
             reason=reason,
             inventory=self._inventory,
-            breaker_tripped=True,
+            breaker_tripped=action is RiskAction.HALT,
         )
         await self.bus.publish(Streams.RISK_DECISION, decision)
-        RISK_DECISIONS.labels(RiskAction.HALT.value, "error").inc()
+        RISK_DECISIONS.labels(action.value, label).inc()
+        self._decisions += 1
 
 
 __all__ = ["RiskService"]

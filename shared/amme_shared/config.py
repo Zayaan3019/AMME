@@ -170,6 +170,43 @@ class RiskConfig(BaseSettings):
     breaker_cooldown_seconds: float = Field(default=30.0, ge=0.0)
     enabled: bool = True
 
+    # Fail-safes between the services. All three exist because the pipeline is
+    # asynchronous: a quote can be approved against a market that has moved,
+    # and a dead upstream must not leave old approvals resting on the book.
+    max_intent_age_ms: float = Field(
+        default=500.0,
+        gt=0.0,
+        description="risk-svc rejects a quote intent older than this "
+        "(e.g. a backlog after a restart)",
+    )
+    max_decision_age_ms: float = Field(
+        default=1000.0,
+        gt=0.0,
+        description="execution-sim-svc will not place quotes from a risk decision older than this",
+    )
+    dead_man_seconds: float = Field(
+        default=2.0,
+        gt=0.0,
+        description="execution-sim-svc pulls every resting quote if it hears nothing "
+        "from risk-svc (no heartbeat, no decision) for this long",
+    )
+    heartbeat_seconds: float = Field(
+        default=0.5,
+        gt=0.0,
+        description="risk-svc sends a liveness heartbeat this often, market or not; "
+        "must be well under dead_man_seconds",
+    )
+
+    @model_validator(mode="after")
+    def _heartbeat_beats_the_dead_man(self) -> RiskConfig:
+        if self.heartbeat_seconds * 2 > self.dead_man_seconds:
+            raise ValueError(
+                f"heartbeat_seconds={self.heartbeat_seconds} must be at most half of "
+                f"dead_man_seconds={self.dead_man_seconds}, or one late heartbeat "
+                "pulls every quote"
+            )
+        return self
+
 
 class ModelConfig(BaseSettings):
     model_config = _env("AMME_MODEL_")

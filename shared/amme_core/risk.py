@@ -18,6 +18,13 @@ Three escalating layers, each strictly stronger than the last:
    spike, or a drawdown from the P&L high-water mark; clears only after a
    cooldown *and* only once the triggering condition has actually normalised.
 
+Independently of the three layers, every approved side is **post-only**: a bid
+at or above the best ask (or an ask at or below the best bid) would execute
+immediately as a taker, so that side is pulled -- what an exchange's post-only
+order type does. A maker strategy that crosses the touch is broken, and a
+simulator that lets the crossing quote rest would credit it a maker rebate for
+a fill it could never have had.
+
 The breaker is intentionally hard to un-trip: a flapping kill switch is worse
 than one that stays latched a few seconds too long.
 """
@@ -81,6 +88,10 @@ class RiskInputs:
     baseline_vol: float = 0.0
     vpin: float = 0.0
     ts_ns: int = 0
+    #: The current touch. ``None`` disables the post-only check (e.g. a caller
+    #: with no book); risk never invents a touch it was not given.
+    best_bid: float | None = None
+    best_ask: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +239,8 @@ class RiskEngine:
             ("bid_size", quote.bid_size),
             ("ask_size", quote.ask_size),
             ("half_spread", quote.half_spread),
+            ("best_bid", 0.0 if inputs.best_bid is None else inputs.best_bid),
+            ("best_ask", 0.0 if inputs.best_ask is None else inputs.best_ask),
         )
         return next((name for name, value in checks if not math.isfinite(value)), "")
 
@@ -335,6 +348,24 @@ class RiskEngine:
             if inputs.inventory - ask_size < -max_qty:
                 ask_size = max(0.0, max_qty + inputs.inventory)
                 reasons.append("ask capped by max_position_value")
+
+        # Post-only. Applied after skew, because the skew moves both prices.
+        if inputs.best_ask is not None and bid_size > 0.0 and bid_price >= inputs.best_ask:
+            bid_size = 0.0
+            reasons.append(
+                f"post-only: bid {bid_price:.8g} >= best ask {inputs.best_ask:.8g}, bid pulled"
+            )
+        if inputs.best_bid is not None and ask_size > 0.0 and ask_price <= inputs.best_bid:
+            ask_size = 0.0
+            reasons.append(
+                f"post-only: ask {ask_price:.8g} <= best bid {inputs.best_bid:.8g}, ask pulled"
+            )
+        if bid_size > 0.0 and ask_size > 0.0 and bid_price >= ask_price:
+            return RiskOutcome(
+                verdict=RiskVerdict.REJECT,
+                reason=f"self-crossed quote: bid {bid_price:.8g} >= ask {ask_price:.8g}",
+                utilisation=utilisation,
+            )
 
         if bid_size <= 0.0 and ask_size <= 0.0:
             return RiskOutcome(

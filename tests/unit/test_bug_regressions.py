@@ -459,3 +459,24 @@ class TestClockOffsetLatchedForever:
         assert not clock.is_stale()
         clock.last_sync_monotonic = _time.monotonic() - clock.resync_interval_seconds - 1
         assert clock.is_stale(), "an aged-out measurement must be re-measured"
+
+
+class TestReportsPrintOnAWindowsConsole:
+    """`make ablation` saved its results, then crashed printing the report: the
+    table has sigma signs and a Windows console is cp1252. Exit 1, and the
+    ablation gate after the print never ran."""
+
+    def test_reports_survive_a_cp1252_console(self, monkeypatch):
+        import io
+        import sys
+
+        from backtest_svc.cli import _utf8_console
+
+        raw = io.BytesIO()
+        console = io.TextIOWrapper(raw, encoding="cp1252")
+        monkeypatch.setattr(sys, "stdout", console)
+        with pytest.raises(UnicodeEncodeError):
+            print("Sharpe σ Δ", flush=True)
+        _utf8_console()
+        print("Sharpe σ Δ", flush=True)
+        assert "σ".encode() in raw.getvalue()

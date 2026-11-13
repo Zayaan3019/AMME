@@ -220,7 +220,10 @@ class TradingEngine:
         )
         quote = self.strategy.decide(ctx)
 
-        outcome = self._apply_risk(quote, snapshot, portfolio.total_pnl(mid), mid, book.ts_event)
+        outcome = self._apply_risk(
+            quote, snapshot, portfolio.total_pnl(mid), mid, book.ts_event,
+            best_bid=book.bids[0].price, best_ask=book.asks[0].price,
+        )
 
         if outcome.verdict is RiskVerdict.HALT:
             self.matching.cancel_all()
@@ -256,6 +259,8 @@ class TradingEngine:
         total_pnl: float,
         mid: float,
         ts_ns: int,
+        best_bid: float | None = None,
+        best_ask: float | None = None,
     ) -> RiskOutcome:
         from amme_core.risk import ProposedQuote
 
@@ -276,6 +281,8 @@ class TradingEngine:
             baseline_vol=snapshot.sigma_baseline if snapshot.vol_warm else 0.0,
             vpin=snapshot.vpin if snapshot.vpin_warm else 0.0,
             ts_ns=ts_ns,
+            best_bid=best_bid,
+            best_ask=best_ask,
         )
         before = self.risk.breaker.trip_count
         outcome = self.risk.evaluate(proposed, inputs)

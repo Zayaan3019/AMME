@@ -45,7 +45,7 @@ class StreamService(abc.ABC):
         )
         self._shutdown = asyncio.Event()
         self._ready = False
-        self._health_checks: list[tuple[str, HealthCheck]] = []
+        self._health_checks: list[tuple[str, HealthCheck, bool]] = []
         self._app: FastAPI | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -56,6 +56,17 @@ class StreamService(abc.ABC):
     async def startup(self) -> None:
         """Acquire resources. Override as needed."""
         return None
+
+    async def wait_for_dependencies(self) -> None:
+        """Runs before :meth:`startup`: wait for the event bus to serve commands.
+
+        Every service keeps its bus in ``self.bus``. Redis can be up but still
+        loading its append-only log after a restart; see
+        :meth:`RedisEventBus.wait_ready`.
+        """
+        wait_ready = getattr(getattr(self, "bus", None), "wait_ready", None)
+        if wait_ready is not None:
+            await wait_ready()
 
     async def shutdown(self) -> None:
         """Release resources. Override as needed. Always runs, even on error."""
@@ -77,20 +88,37 @@ class StreamService(abc.ABC):
             return False
 
     # -- health ------------------------------------------------------------
-    def add_health_check(self, name: str, check: HealthCheck) -> None:
-        self._health_checks.append((name, check))
+    def add_health_check(self, name: str, check: HealthCheck, *, critical: bool = True) -> None:
+        """Register a check. A failing *critical* check makes the service
+        unhealthy (503). A failing non-critical one makes it ``degraded``
+        (still 200): the service does its main job, but something it should
+        also be doing is not happening -- and that must be visible, not
+        silent. Recording ticks to TimescaleDB is the example: market data
+        still flows without it, but nothing is being saved for training or
+        replay."""
+        self._health_checks.append((name, check, critical))
 
-    async def _collect_health(self) -> tuple[bool, dict[str, str]]:
+    async def _collect_health(self) -> tuple[str, dict[str, str]]:
+        """``("healthy" | "degraded" | "unhealthy", per-check details)``."""
         details: dict[str, str] = {}
         healthy = self._ready
-        for name, check in self._health_checks:
+        degraded = False
+        for name, check, critical in self._health_checks:
             try:
                 ok, detail = await check()
             except Exception as exc:
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
-            details[name] = ("ok: " if ok else "FAIL: ") + detail
-            healthy = healthy and ok
-        return healthy, details
+            if ok:
+                details[name] = "ok: " + detail
+            elif critical:
+                details[name] = "FAIL: " + detail
+                healthy = False
+            else:
+                details[name] = "DEGRADED: " + detail
+                degraded = True
+        if not healthy:
+            return "unhealthy", details
+        return ("degraded" if degraded else "healthy"), details
 
     # -- HTTP surface ------------------------------------------------------
     def build_app(self) -> FastAPI:
@@ -99,6 +127,7 @@ class StreamService(abc.ABC):
 
         @contextlib.asynccontextmanager
         async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+            await self.wait_for_dependencies()
             await self.startup()
             self._ready = True
             SERVICE_UP.labels(self.name).set(1)
@@ -118,14 +147,10 @@ class StreamService(abc.ABC):
 
         @app.get("/health")
         async def health() -> Response:
-            healthy, details = await self._collect_health()
+            status, details = await self._collect_health()
             return JSONResponse(
-                status_code=200 if healthy else 503,
-                content={
-                    "service": self.name,
-                    "status": "healthy" if healthy else "unhealthy",
-                    "checks": details,
-                },
+                status_code=503 if status == "unhealthy" else 200,
+                content={"service": self.name, "status": status, "checks": details},
             )
 
         @app.get("/metrics")

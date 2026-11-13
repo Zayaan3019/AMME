@@ -139,3 +139,67 @@ class TestDashboard:
     def test_history_endpoint(self) -> None:
         payload = _get("/api/history", 8000).json()
         assert "points" in payload
+
+
+@pytest.mark.integration
+class TestFailSafesLive:
+    def test_risk_heartbeats_and_the_dead_man_is_armed(self) -> None:
+        risk = _get("/health", 8005).json()["checks"]["risk_state"]
+        beats = int(risk.split("heartbeats=")[1].split()[0])
+        time.sleep(1.5)
+        later = int(_get("/health", 8005).json()["checks"]["risk_state"].split("heartbeats=")[1].split()[0])
+        assert later > beats, "risk-svc heartbeats on a fixed cadence, market or not"
+        portfolio = _get("/health", 8006).json()["checks"]["portfolio"]
+        assert "dead_man=armed" in portfolio
+
+    def test_ticks_are_being_recorded(self) -> None:
+        detail = _get("/health", 8001).json()["checks"]["timescaledb"]
+        assert detail.startswith("ok: recording"), detail
+
+
+@pytest.mark.integration
+class TestRecordingSegments:
+    """Segments are found in SQL; a gap longer than max_gap starts a new one."""
+
+    SYMBOL = "ITESTSEGUSDT"
+
+    async def test_segments_split_at_gaps(self) -> None:
+        import sys
+
+        sys.path.insert(0, "services/backtest-svc")
+        from backtest_svc.replay import TimescaleReplaySource
+
+        from amme_shared.config import get_settings
+        from amme_shared.db import TickStore
+        from amme_shared.events import DataSource, OrderBookUpdate, PriceLevel
+
+        def book(i: int, t_s: float) -> OrderBookUpdate:
+            ns = int((1_700_000_000 + t_s) * 1e9)
+            return OrderBookUpdate(
+                symbol=self.SYMBOL, ts_event=ns, ts_ingest=ns, source=DataSource.SIMULATOR,
+                bids=[PriceLevel(price=10.0, size=1.0)], asks=[PriceLevel(price=10.01, size=1.0)],
+                last_update_id=i, is_snapshot=False,
+            )
+
+        dsn = get_settings().infra.postgres_dsn
+        store = TickStore(dsn)
+        await store.connect()
+        try:
+            async with store.pool.acquire() as conn:
+                await conn.execute("DELETE FROM book_snapshots WHERE symbol = $1", self.SYMBOL)
+            # 3 books 1 s apart, a 60 s gap, then 2 books.
+            await store.write_books([book(0, 0), book(1, 1), book(2, 2), book(3, 62), book(4, 63)])
+            source = TimescaleReplaySource(dsn)
+            try:
+                segments = await source.segments(self.SYMBOL, max_gap_seconds=5.0)
+                assert [s.n_books for s in segments] == [3, 2]
+                first = segments[0]
+                loaded = await source.load(self.SYMBOL, first.window.start_ns, first.end_exclusive_ns,
+                                           chunk_seconds=1.0)
+                assert [b.last_update_id for b, _ in loaded] == [0, 1, 2]
+            finally:
+                await source.close()
+        finally:
+            async with store.pool.acquire() as conn:
+                await conn.execute("DELETE FROM book_snapshots WHERE symbol = $1", self.SYMBOL)
+            await store.close()

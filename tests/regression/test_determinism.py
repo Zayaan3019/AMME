@@ -229,6 +229,104 @@ class TestNoHiddenNonDeterminism:
         ]
         assert not offenders, "wall-clock read in amme_core:\n" + "\n".join(offenders)
 
+    #: Rule 1 (no I/O): modules whose import alone means network, disk,
+    #: process or log side effects. ``amme_shared.clock`` / ``events`` are pure
+    #: value types and allowed.
+    IO_MODULES = frozenset({
+        "socket", "ssl", "requests", "httpx", "aiohttp", "websockets", "redis",
+        "asyncpg", "psycopg", "psycopg2", "sqlite3", "urllib", "http", "subprocess",
+        "shutil", "pickle", "logging", "structlog", "os", "pathlib", "io", "tempfile",
+        "amme_shared.db", "amme_shared.streams", "amme_shared.logging",
+        "amme_shared.metrics", "amme_shared.service",
+    })
+    IO_BUILTINS = frozenset({"open", "print", "input", "exec", "eval", "breakpoint"})
+
+    @classmethod
+    def _io_violations(cls, source: str, filename: str) -> list[str]:
+        out = []
+        for node in ast.walk(ast.parse(source, filename=filename)):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                names = []
+            for name in names:
+                if name in cls.IO_MODULES or name.split(".")[0] in cls.IO_MODULES:
+                    out.append(f"{filename}:{node.lineno}: import {name}")
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in cls.IO_BUILTINS):
+                out.append(f"{filename}:{node.lineno}: {node.func.id}()")
+        return out
+
+    _MUTABLE_FACTORIES = frozenset(
+        {"list", "dict", "set", "bytearray", "defaultdict", "deque", "OrderedDict", "Counter"}
+    )
+
+    @classmethod
+    def _mutable_global_violations(cls, source: str, filename: str) -> list[str]:
+        """Module-level bindings to mutable containers, and ``global`` statements.
+
+        ``__all__`` is exempt: it is the export list, read by the import system.
+        """
+        tree = ast.parse(source, filename=filename)
+        out = [f"{filename}:{n.lineno}: global statement"
+               for n in ast.walk(tree) if isinstance(n, ast.Global)]
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            names = [t.id for t in targets if isinstance(t, ast.Name)]
+            if names == ["__all__"]:
+                continue
+            literal = isinstance(value, (ast.List, ast.Dict, ast.Set,
+                                         ast.ListComp, ast.DictComp, ast.SetComp))
+            factory = (isinstance(value, ast.Call)
+                       and _dotted_name(value.func).split(".")[-1] in cls._MUTABLE_FACTORIES)
+            if literal or factory:
+                out.append(f"{filename}:{node.lineno}: module-level mutable {names or '?'}")
+        return out
+
+    @staticmethod
+    def _core_sources() -> list[tuple[str, str]]:
+        core = pathlib.Path(__file__).resolve().parents[2] / "shared" / "amme_core"
+        return [(p.name, p.read_text(encoding="utf-8")) for p in sorted(core.rglob("*.py"))]
+
+    def test_no_io_in_core(self):
+        """Rule 1: ``amme_core`` never touches the network, disk, a database or
+        a logger. One ``logging.info`` in the matching engine is a side effect
+        the replay test cannot see, and one ``open()`` makes a backtest depend
+        on the working directory."""
+        offenders = [v for name, src in self._core_sources()
+                     for v in self._io_violations(src, name)]
+        assert not offenders, "I/O in amme_core:\n" + "\n".join(offenders)
+
+    def test_no_global_mutable_state_in_core(self):
+        """Rule 4: components are instantiated, not imported. A module-level
+        dict is shared by every simulator in the process, so one run that
+        edits it changes every later run -- the replay test would still pass
+        in isolation."""
+        offenders = [v for name, src in self._core_sources()
+                     for v in self._mutable_global_violations(src, name)]
+        assert not offenders, "global mutable state in amme_core:\n" + "\n".join(offenders)
+
+    def test_purity_detectors_actually_detect(self):
+        """Guard the guards, as below: each scanner must flag a planted violation."""
+        assert self._io_violations("import socket\n", "x.py")
+        assert self._io_violations("from amme_shared.logging import get_logger\n", "x.py")
+        assert self._io_violations("def f():\n    print(1)\n", "x.py")
+        assert not self._io_violations("import math\nfrom amme_shared.events import Side\n", "x.py")
+        assert self._mutable_global_violations("CACHE = {}\n", "x.py")
+        assert self._mutable_global_violations("SEEN: list[int] = list()\n", "x.py")
+        assert self._mutable_global_violations("def f():\n    global X\n", "x.py")
+        assert not self._mutable_global_violations(
+            "__all__ = ['a']\nLIMIT = 5\nT = MappingProxyType({1: 2})\n", "x.py"
+        )
+        assert len(self._core_sources()) > 10
+
     def test_detector_actually_detects(self):
         """Guard the guard: a static check that can never fail is worthless.
 

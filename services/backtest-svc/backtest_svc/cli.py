@@ -204,8 +204,19 @@ def main(argv: list[str] | None = None) -> int:
     lam.set_defaults(func=cmd_calibrate_lambda)
 
     args = parser.parse_args(argv)
+    _utf8_console()
     result: int = args.func(args)
     return result
+
+
+def _utf8_console() -> None:
+    """Reports contain sigma and delta signs. On a Windows console (cp1252)
+    printing them raised UnicodeEncodeError *after* the results were saved,
+    so the command exited 1 and the ablation gate below the print never ran."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 if __name__ == "__main__":

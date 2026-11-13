@@ -48,10 +48,18 @@ services:
     # it now does, rather than crashing. Reaching this ceiling at all means
     # AMME_STREAM_MAXLEN is mis-sized.
     command: redis-server --appendonly yes --save "" --maxmemory 1gb --maxmemory-policy noeviction
-    ports: ["6379:6379"]
+    # Host-side ports are bound to 127.0.0.1 and overridable. 0.0.0.0 published an
+    # unauthenticated Redis and a Postgres with a default password to the LAN, and
+    # a fixed 5432 collides with any other local Postgres: a restart then fails to
+    # bind, and the database stays down while the rest of the stack runs on.
+    # Containers talk over the `amme` network and never use these ports.
+    ports: ["127.0.0.1:${AMME_REDIS_HOST_PORT:-6379}:6379"]
     volumes: [redis-data:/data]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # `redis-cli ping` exits 0 even when Redis answers "LOADING" while it
+      # replays the append-only log, so the old check passed too early and
+      # dependants crashed on their first command. Require a real PONG.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -68,7 +76,7 @@ services:
       POSTGRES_DB: amme
       # Tick storage is append-heavy; a larger WAL reduces checkpoint churn.
       POSTGRES_INITDB_ARGS: "--data-checksums"
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:${AMME_TIMESCALE_HOST_PORT:-5432}:5432"]
     volumes:
       - timescale-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
@@ -241,7 +249,7 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    ports: ["9090:9090"]
+    ports: ["127.0.0.1:${AMME_PROMETHEUS_HOST_PORT:-9090}:9090"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
       interval: 10s

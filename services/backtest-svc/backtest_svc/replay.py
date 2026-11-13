@@ -29,6 +29,7 @@ import bisect
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
+from typing import Any
 
 from amme_shared.db import TickStore
 from amme_shared.events import OrderBookUpdate, TradeTick
@@ -67,6 +68,23 @@ def merge_causally(
         hi = bisect.bisect_right(trade_times, book.ts_event)
         yield book, list(ordered_trades[lo:hi])
         previous_ts = book.ts_event
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedSegment:
+    """One contiguous stretch of the recording (see ``segments``)."""
+
+    window: ReplayWindow
+    n_books: int
+
+    @property
+    def end_exclusive_ns(self) -> int:
+        """Exclusive upper bound that still includes the last book.
+
+        Stored timestamps have microsecond resolution, so ``end + 1 ns``
+        rounds back to ``end`` and ``ts_event < end`` would drop the final row.
+        """
+        return self.window.end_ns + 1_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,24 +141,89 @@ class TimescaleReplaySource:
             end_ns=int(row["hi"].timestamp() * 1e9),
         )
 
-    async def load(
-        self, symbol: str, start_ns: int, end_ns: int, limit: int = 2_000_000
-    ) -> list[tuple[OrderBookUpdate, list[TradeTick]]]:
-        """Materialise a causally-merged window."""
+    async def segments(
+        self, symbol: str, max_gap_seconds: float = 5.0
+    ) -> list[RecordedSegment]:
+        """Contiguous stretches of the recording, found in SQL from timestamps.
+
+        Same rule as :func:`split_contiguous` (a gap longer than
+        ``max_gap_seconds`` starts a new segment), but computed by the
+        database with a window function, so finding the segment to train or
+        replay on never pulls the whole recording into memory. That used to
+        be the first step, and after months of recording it hit the pool's
+        30 s command timeout.
+        """
         await self.connect()
-        books = await self._store.read_books(symbol, start_ns, end_ns, limit)
-
         async with self._store.pool.acquire() as conn:
-            from datetime import UTC, datetime
-
-            records = await conn.fetch(
-                "SELECT * FROM trades WHERE symbol = $1 AND ts_event >= $2"
-                " AND ts_event < $3 ORDER BY ts_event ASC, trade_id ASC LIMIT $4",
+            rows = await conn.fetch(
+                """
+                WITH g AS (
+                    SELECT ts_event,
+                           ts_event - lag(ts_event) OVER (ORDER BY ts_event) AS gap
+                    FROM book_snapshots WHERE symbol = $1
+                ), s AS (
+                    SELECT ts_event,
+                           sum(CASE WHEN gap IS NULL OR gap > make_interval(secs => $2)
+                                    THEN 1 ELSE 0 END) OVER (ORDER BY ts_event) AS seg
+                    FROM g
+                )
+                SELECT seg, min(ts_event) AS lo, max(ts_event) AS hi, count(*) AS n
+                FROM s GROUP BY seg ORDER BY seg
+                """,
                 symbol,
-                datetime.fromtimestamp(start_ns / 1e9, tz=UTC),
-                datetime.fromtimestamp(end_ns / 1e9, tz=UTC),
-                limit,
+                float(max_gap_seconds),
             )
+        return [
+            RecordedSegment(
+                window=ReplayWindow(
+                    symbol=symbol,
+                    start_ns=int(r["lo"].timestamp() * 1e9),
+                    end_ns=int(r["hi"].timestamp() * 1e9),
+                ),
+                n_books=int(r["n"]),
+            )
+            for r in rows
+        ]
+
+    async def load(
+        self,
+        symbol: str,
+        start_ns: int,
+        end_ns: int,
+        limit: int = 2_000_000,
+        chunk_seconds: float | None = None,
+    ) -> list[tuple[OrderBookUpdate, list[TradeTick]]]:
+        """Materialise a causally-merged window.
+
+        ``chunk_seconds`` reads the window in slices so that no single query
+        runs into the pool's command timeout on a long recording. Books and
+        trades are gathered across all slices and merged once at the end, so
+        a trade near a slice boundary still attaches to the right book.
+        """
+        await self.connect()
+        if chunk_seconds and chunk_seconds > 0:
+            step = int(chunk_seconds * 1e9)
+            bounds = [(a, min(a + step, end_ns)) for a in range(start_ns, end_ns, step)]
+        else:
+            bounds = [(start_ns, end_ns)]
+
+        books: list[OrderBookUpdate] = []
+        records: list[Any] = []
+        from datetime import UTC, datetime
+
+        for a, b in bounds:
+            books.extend(await self._store.read_books(symbol, a, b, limit))
+            async with self._store.pool.acquire() as conn:
+                records.extend(
+                    await conn.fetch(
+                        "SELECT * FROM trades WHERE symbol = $1 AND ts_event >= $2"
+                        " AND ts_event < $3 ORDER BY ts_event ASC, trade_id ASC LIMIT $4",
+                        symbol,
+                        datetime.fromtimestamp(a / 1e9, tz=UTC),
+                        datetime.fromtimestamp(b / 1e9, tz=UTC),
+                        limit,
+                    )
+                )
 
         from amme_shared.events import AggressorSide, DataSource
 

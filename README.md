@@ -78,8 +78,8 @@ so use it to rank arms, not as a fund-level figure.
 | Naive symmetric | −0.158 ± 0.329 | −392 | 0.394 | 0.01449 | 2/10 |
 | Pure Avellaneda–Stoikov | +0.027 ± 0.069 | 243 | 0.073 | 0.00405 | 8/10 |
 | A-S + toxicity gate | +0.041 ± 0.072 | 385 | 0.062 | **0.00394** | 8/10 |
-| A-S + DeepLOB drift | +0.128 ± 0.128 | **596** | 0.054 | 0.00828 | 8/10 |
-| **Full AMME** | **+0.129 ± 0.127** | 590 | **0.051** | 0.00803 | 8/10 |
+| A-S + DeepLOB drift | **+0.145 ± 0.137** | **472** | 0.079 | 0.01101 | 9/10 |
+| **Full AMME** | +0.143 ± 0.177 | 425 | 0.078 | 0.01074 | 8/10 |
 
 **Every mechanism earns its place.** Paired, seed by seed:
 
@@ -87,12 +87,13 @@ so use it to rank arms, not as a fund-level figure.
 |---|---:|---:|---:|
 | A-S vs naive | **+0.185** | **+635** | 8/10 |
 | Toxicity gate | +0.014 | +142 | 7/10 |
-| DeepLOB drift | **+0.101** | **+353** | 8/10 |
+| DeepLOB drift | **+0.118** | **+229** | 8/10 |
 
-P&L rises at every step of the build-up — naive < pure A-S < A-S+toxicity <
-A-S+drift < AMME. Sharpe does not: full AMME (590) is level with A-S + drift
-(596), well inside the seed-to-seed spread; adding the toxicity gate on top of
-drift lowers max drawdown rather than raising Sharpe.
+P&L rises through the first three steps — naive < pure A-S < A-S+toxicity <
+A-S+drift — and the drift signal is the big one. Adding the toxicity gate on
+top of drift then changes nothing measurable: full AMME (+0.143, Sharpe 425)
+is level with A-S + drift (+0.145, Sharpe 472), well inside the seed-to-seed
+spread. Since 2026-11-13 risk enforces **post-only** (a maker bid at or above the best ask, or an ask at or below the best bid, is pulled rather than sent), in the backtest exactly as in the live service. Before that, a drift-skewed quote could cross the touch and was still filled as a maker. Only the two drift arms changed: Full AMME went from +0.129 ± 0.127 (Sharpe 590, 474 fills) to +0.143 ± 0.177 (Sharpe 425, 418 fills).
 
 **The sharpest result is the toxicity split.** 86% of the naive baseline's loss
 is incurred during high-VPIN periods: it is being adversely selected, exactly as
@@ -223,7 +224,7 @@ make logs
 
 ```bash
 make install
-make test                # 314 tests (25 need the live stack)
+make test                # 360 tests (28 need the live stack)
 make regression-test     # lint + types + tests + ablation report
 ```
 
@@ -242,7 +243,7 @@ activate the drift signal.
 
 ## Testing
 
-314 tests: 289 run offline; 25 integration tests run against the live stack
+360 tests: 332 run offline; 28 integration tests run against the live stack
 (`AMME_INTEGRATION=1`, after `make up`). The ones that carry weight:
 
 **Hand-computed quant verification** — every formula checked against a value
